@@ -1,0 +1,69 @@
+package com.jgraph.analyzer.parser;
+
+import com.jgraph.analyzer.model.JavaMethod;
+import com.jgraph.analyzer.model.MethodCall;
+import org.objectweb.asm.AnnotationVisitor;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
+
+import java.util.Arrays;
+import java.util.List;
+
+public class ModelBuildingMethodVisitor extends MethodVisitor {
+
+    private final List<JavaMethod> methods;
+    private final List<MethodCall> calls;
+
+    private final String ownerClassFqcn;
+    private final String methodName;
+    private final String descriptor;
+    private final String callerSignature;
+
+    private boolean isTransactional = false;
+
+    public ModelBuildingMethodVisitor(List<JavaMethod> methods,
+                                      List<MethodCall> calls,
+                                      String ownerClassFqcn,
+                                      String methodName,
+                                      String descriptor) {
+        super(Opcodes.ASM9);
+        this.methods = methods;
+        this.calls = calls;
+        this.ownerClassFqcn = ownerClassFqcn;
+        this.methodName = methodName;
+        this.descriptor = descriptor;
+        this.callerSignature = ownerClassFqcn + "#" + methodName + descriptor;
+    }
+
+    @Override
+    public AnnotationVisitor visitAnnotation(String annotDescriptor, boolean visible) {
+        if (annotDescriptor.contains("Transactional")) {
+            this.isTransactional = true;
+        }
+        return super.visitAnnotation(annotDescriptor, visible);
+    }
+
+    @Override
+    public void visitMethodInsn(int opcode, String owner, String name, String targetDescriptor, boolean isInterface) {
+        String targetSignature = owner + "#" + name + targetDescriptor;
+        this.calls.add(new MethodCall(this.callerSignature, targetSignature));
+    }
+
+    @Override
+    public void visitEnd() {
+        String returnType = Type.getReturnType(this.descriptor).getClassName();
+        List<String> parameterTypes = Arrays.stream(Type.getArgumentTypes(this.descriptor))
+                .map(Type::getClassName)
+                .toList();
+
+        this.methods.add(new JavaMethod(
+                this.ownerClassFqcn,
+                this.methodName,
+                this.descriptor,
+                returnType,
+                parameterTypes,
+                this.isTransactional
+        ));
+    }
+}
