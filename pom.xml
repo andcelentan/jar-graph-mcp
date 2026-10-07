@@ -41,6 +41,13 @@
                 <artifactId>neo4j-java-driver</artifactId>
                 <version>${neo4j.driver.version}</version>
             </dependency>
+
+            <!-- Utility -->
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-lang3</artifactId>
+                <version>3.21.0</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 </project>
