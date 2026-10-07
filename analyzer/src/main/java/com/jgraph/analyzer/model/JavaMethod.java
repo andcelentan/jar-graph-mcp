@@ -3,11 +3,11 @@ package com.jgraph.analyzer.model;
 import java.util.List;
 
 public record JavaMethod(
-        String ownerClassFqcn,          // es. "com/example/OrderServiceImpl"
-        String name,                    // es. "process"
-        String descriptor,              // es. "(Ljava/lang/String;)V" (essenziale per l'univocità su ASM)
-        String returnType,              // es. "void" oppure "com.example.Order"
-        List<String> parameterTypes,    // es. ["java.lang.String", "int"]
+        String ownerClassFqcn,          // e.g. "com/example/OrderServiceImpl"
+        String name,                    // e.g. "process"
+        String descriptor,              // e.g. "(Ljava/lang/String;)V" (essential for uniqueness in ASM)
+        String returnType,              // e.g. "void" or "com.example.Order"
+        List<String> parameterTypes,    // e.g. ["java.lang.String", "int"]
         boolean isTransactional
 ) {
     /**
