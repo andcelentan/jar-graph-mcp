@@ -3,7 +3,6 @@ package com.jgraph.analyzer.parser;
 import com.jgraph.analyzer.model.AnalysisResult;
 import com.jgraph.analyzer.model.JavaClass;
 import com.jgraph.analyzer.model.JavaMethod;
-import com.jgraph.analyzer.model.MethodCall;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -33,7 +32,7 @@ class JarReaderTest {
             result = reader.readAndBuildModel();
         }
 
-        // Verifica Classi
+        // Verify Classes
         assertThat(result.classes())
                 .extracting(JavaClass::fqcn)
                 .contains(
@@ -51,20 +50,20 @@ class JarReaderTest {
                 .findFirst().orElseThrow();
         assertThat(testImpl.isInterface()).isFalse();
 
-        // Verifica Metodi e Transactional
+        // Verify Methods and Transactional
         JavaMethod transactionalMethod = result.methods().stream()
                 .filter(m -> m.name().equals("transactionalMethod"))
                 .findFirst().orElseThrow();
         assertThat(transactionalMethod.isTransactional()).isTrue();
 
-        // Verifica Overload e Signature
+        // Verify Overload and Signature
         assertThat(result.methods())
                 .filteredOn(m -> m.name().equals("overloadedMethod"))
                 .hasSize(2)
                 .extracting(JavaMethod::descriptor)
                 .containsExactlyInAnyOrder("(I)V", "(Ljava/lang/String;)V");
 
-        // Verifica MethodCall [:CALLS]
+        // Verify MethodCall [:CALLS]
         // transactionalMethod -> privateMethod
         assertThat(result.calls())
                 .anyMatch(call -> 

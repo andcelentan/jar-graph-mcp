@@ -20,7 +20,7 @@ public class AppAnalyzer {
 
         Path path = Path.of(args[0]);
         if (!Files.exists(path)) {
-            System.err.println("File JAR not found: " + path.toAbsolutePath());
+            System.err.println("JAR file not found: " + path.toAbsolutePath());
             return;
         }
 

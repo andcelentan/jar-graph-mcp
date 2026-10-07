@@ -31,7 +31,7 @@ public class JarReader {
         while (entries.hasMoreElements()) {
             JarEntry entry = entries.nextElement();
 
-            // Escludiamo directory e file speciali come module-info
+            // Exclude directories and special files like module-info
             if (!entry.isDirectory() && entry.getName().endsWith(".class") && !entry.getName().endsWith("module-info.class")) {
 
                 try (InputStream is = this.jarFile.getInputStream(entry)) {
