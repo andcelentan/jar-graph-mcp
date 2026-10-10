@@ -1,9 +1,13 @@
 package com.jgraph.analyzer;
 
+import com.jgraph.analyzer.config.DatabaseConfig;
 import com.jgraph.analyzer.model.AnalysisResult;
 import com.jgraph.analyzer.model.JavaClass;
 import com.jgraph.analyzer.model.JavaMethod;
 import com.jgraph.analyzer.parser.JarReader;
+import com.jgraph.analyzer.repository.GraphRepository;
+import com.jgraph.analyzer.repository.Neo4jGraphRepository;
+import org.neo4j.driver.exceptions.Neo4jException;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -30,13 +34,24 @@ public class AppAnalyzer {
         try (JarFile jarFile = new JarFile(path.toFile())) {
             JarReader reader = new JarReader(jarFile);
             AnalysisResult result = reader.readAndBuildModel();
+            System.out.printf("Bytecode parsed successfully: %d classes found.%n", result.classes().size());
+
+            System.out.println("Connecting to Neo4j and persisting graph...");
+            try(GraphRepository repository = new Neo4jGraphRepository(DatabaseConfig.load())) {
+                repository.initSchema();
+                repository.deleteAll();
+                repository.save(result);
+            }
+            System.out.println("Persistence complete.");
 
             long elapsed = System.currentTimeMillis() - start;
             printSummary(result, elapsed);
 
         } catch (IOException e) {
             System.err.println("I/O error during JAR analysis: "+ e.getMessage());
-            e.printStackTrace();
+        } catch (Neo4jException e) {
+            System.err.println("Database error: Could not interact with Neo4j. Is the Docker container running?");
+            System.err.println("Details: " + e.getMessage());
         }
     }
 
