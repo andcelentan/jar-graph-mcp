@@ -6,13 +6,9 @@ import com.jgraph.analyzer.model.JavaMethod;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.file.Path;
-import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
-import java.util.jar.JarOutputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -23,8 +19,10 @@ class JarReaderTest {
 
     @Test
     void shouldCorrectlyParseJarFile() throws IOException {
-        Path jarPath = tempDir.resolve("test.jar");
-        createTestJar(jarPath);
+        Path jarPath = TestJars.createJar(tempDir.resolve("test.jar"),
+                JarReaderTestFixture.class,
+                JarReaderTestFixture.TestInterface.class,
+                JarReaderTestFixture.TestImplementation.class);
 
         AnalysisResult result;
         try (JarFile jarFile = new JarFile(jarPath.toFile())) {
@@ -77,31 +75,5 @@ class JarReaderTest {
                     call.callerSignature().contains("interfaceMethod") && 
                     call.targetSignature().contains("java/io/PrintStream#println")
                 );
-    }
-
-    private void createTestJar(Path jarPath) throws IOException {
-        Class<?>[] classesToInclude = {
-                JarReaderTestFixture.class,
-                JarReaderTestFixture.TestInterface.class,
-                JarReaderTestFixture.TestImplementation.class
-        };
-
-        try (JarOutputStream jos = new JarOutputStream(new FileOutputStream(jarPath.toFile()))) {
-            for (Class<?> clazz : classesToInclude) {
-                String classFilePath = clazz.getName().replace('.', '/') + ".class";
-                try (InputStream is = clazz.getClassLoader().getResourceAsStream(classFilePath)) {
-                    if (is == null) {
-                        throw new IOException("Could not find class file for " + clazz.getName());
-                    }
-                    jos.putNextEntry(new JarEntry(classFilePath));
-                    byte[] buffer = new byte[1024];
-                    int bytesRead;
-                    while ((bytesRead = is.read(buffer)) != -1) {
-                        jos.write(buffer, 0, bytesRead);
-                    }
-                    jos.closeEntry();
-                }
-            }
-        }
     }
 }
