@@ -8,6 +8,9 @@ public record JavaMethod(
         String descriptor,              // e.g. "(Ljava/lang/String;)V" (essential for uniqueness in ASM)
         String returnType,              // e.g. "void" or "com.example.Order"
         List<String> parameterTypes,    // e.g. ["java.lang.String", "int"]
+        Visibility visibility,
+        boolean isStatic,
+        boolean isAbstract,
         boolean isTransactional
 ) {
     /**

@@ -1,12 +1,18 @@
 package com.jgraph.analyzer.repository;
 
 import com.jgraph.analyzer.model.AnalysisResult;
+import com.jgraph.analyzer.model.ClassKind;
 import com.jgraph.analyzer.model.JavaClass;
 import com.jgraph.analyzer.model.JavaMethod;
 import com.jgraph.analyzer.model.MethodCall;
+import com.jgraph.analyzer.model.MethodOverride;
+import com.jgraph.analyzer.model.Visibility;
+import com.jgraph.analyzer.parser.HierarchyFixture;
 import com.jgraph.analyzer.parser.JarReader;
 import com.jgraph.analyzer.parser.JarReaderTestFixture;
 import com.jgraph.analyzer.parser.TestJars;
+import com.jgraph.analyzer.parser.TypeKindFixture;
+import com.jgraph.analyzer.resolver.OverrideResolver;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -200,6 +206,129 @@ class Neo4jGraphRepositoryIT {
                 .isEqualTo(1);
     }
 
+    @Test
+    void shouldPersistClassAndInterfaceHierarchy() {
+        JavaClass api = iface("com/acme/Api");
+        JavaClass auditedApi = iface("com/acme/AuditedApi", api.fqcn());
+        JavaClass base = abstractClazz("com/acme/AbstractService", auditedApi.fqcn());
+        JavaClass service = subclass("com/acme/Service", base.fqcn());
+
+        repository.save(new AnalysisResult(List.of(api, auditedApi, base, service), List.of(), List.of()));
+
+        assertThat(count("""
+                MATCH (:Class {fqcn: 'com/acme/Service'})-[r:EXTENDS]->(:Class {fqcn: 'com/acme/AbstractService'})
+                RETURN count(r)
+                """)).isEqualTo(1);
+        assertThat(count("""
+                MATCH (:Class {fqcn: 'com/acme/AbstractService'})-[r:IMPLEMENTS]->(:Class {fqcn: 'com/acme/AuditedApi'})
+                RETURN count(r)
+                """)).isEqualTo(1);
+        // Interface inheritance is EXTENDS, never IMPLEMENTS
+        assertThat(count("""
+                MATCH (:Class {fqcn: 'com/acme/AuditedApi'})-[r:EXTENDS]->(:Class {fqcn: 'com/acme/Api'})
+                RETURN count(r)
+                """)).isEqualTo(1);
+        assertThat(count("MATCH (:Class {kind: 'INTERFACE'})-[r:IMPLEMENTS]->() RETURN count(r)")).isZero();
+        assertThat(count("MATCH (c:Class {fqcn: 'com/acme/AbstractService'}) WHERE c.isAbstract RETURN count(c)"))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void shouldPersistKindsWithoutImplicitSupertypeNodes(@TempDir Path tempDir) throws IOException {
+        Path jarPath = TestJars.createJar(tempDir.resolve("kinds.jar"), TypeKindFixture.CLASSES);
+        AnalysisResult parsed;
+        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
+            parsed = new JarReader(jarFile).readAndBuildModel();
+        }
+
+        repository.save(parsed);
+
+        try (Session session = driver.session()) {
+            List<String> kinds = session.run("MATCH (c:Class) WHERE c.kind IS NOT NULL RETURN c.kind AS kind")
+                    .list(r -> r.get("kind").asString());
+            assertThat(kinds).containsExactlyInAnyOrder("CLASS", "INTERFACE", "ENUM", "RECORD", "ANNOTATION");
+        }
+        // No supernodes: implicit supertypes never become nodes through EXTENDS
+        assertThat(count("""
+                MATCH (c:Class)
+                WHERE c.fqcn IN ['java/lang/Object', 'java/lang/Enum', 'java/lang/Record', 'java/lang/annotation/Annotation']
+                RETURN count(c)
+                """)).isZero();
+    }
+
+    @Test
+    void shouldResolveCallsToImplementationsThroughOverrides() {
+        // Checkout calls the interface; the code that runs is in a subclass (pay) and in an abstract base (refund)
+        JavaClass api = iface("com/acme/PaymentService");
+        JavaClass base = abstractClazz("com/acme/AbstractPaymentService", api.fqcn());
+        JavaClass card = subclass("com/acme/CardPaymentService", base.fqcn());
+        JavaClass checkout = clazz("com/acme/Checkout");
+
+        JavaMethod pay = abstractMethod(api.fqcn(), "pay");
+        JavaMethod refund = abstractMethod(api.fqcn(), "refund");
+        JavaMethod baseRefund = method(base.fqcn(), "refund");
+        JavaMethod cardPay = method(card.fqcn(), "pay");
+        JavaMethod checkoutMethod = method(checkout.fqcn(), "checkout");
+
+        repository.save(new AnalysisResult(
+                List.of(api, base, card, checkout),
+                List.of(pay, refund, baseRefund, cardPay, checkoutMethod),
+                List.of(call(checkoutMethod, pay), call(checkoutMethod, refund)),
+                List.of(override(cardPay, pay), override(baseRefund, refund))));
+
+        assertThat(count("MATCH ()-[r:OVERRIDES]->() RETURN count(r)")).isEqualTo(2);
+        assertThat(count("""
+                MATCH (m:Method {signature: $signature})
+                WHERE m.visibility = 'PUBLIC' AND NOT m.isStatic AND m.isAbstract
+                RETURN count(m)
+                """, Map.of("signature", pay.signature())))
+                .isEqualTo(1);
+
+        // Resolution query documented in ADR-0006
+        try (Session session = driver.session()) {
+            List<String> resolved = session.run("""
+                            MATCH (:Method {signature: $caller})-[:CALLS]->(:Method)<-[:OVERRIDES*0..]-(impl:Method)
+                            WHERE NOT impl.isAbstract
+                            RETURN impl.signature AS impl
+                            """, Map.of("caller", checkoutMethod.signature()))
+                    .list(r -> r.get("impl").asString());
+            assertThat(resolved).containsExactlyInAnyOrder(cardPay.signature(), baseRefund.signature());
+        }
+    }
+
+    @Test
+    void shouldResolveCallsInHierarchyParsedFromJar(@TempDir Path tempDir) throws IOException {
+        Path jarPath = TestJars.createJar(tempDir.resolve("hierarchy.jar"), HierarchyFixture.CLASSES);
+        AnalysisResult parsed;
+        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
+            parsed = new JarReader(jarFile).readAndBuildModel();
+        }
+
+        // Same pipeline as AppAnalyzer: parse -> resolve -> persist
+        repository.save(new OverrideResolver().resolve(parsed));
+
+        String checkout = internalName(HierarchyFixture.Checkout.class);
+        String card = internalName(HierarchyFixture.CardPaymentService.class);
+        String base = internalName(HierarchyFixture.AbstractPaymentService.class);
+
+        assertThat(count("""
+                MATCH (:Class {fqcn: $card})-[r:EXTENDS]->(:Class {fqcn: $base})
+                RETURN count(r)
+                """, Map.of("card", card, "base", base)))
+                .isEqualTo(1);
+
+        // Checkout calls PaymentService#pay (interface): the code that runs is CardPaymentService#pay
+        try (Session session = driver.session()) {
+            List<String> resolved = session.run("""
+                            MATCH (:Method {signature: $caller})-[:CALLS]->(:Method)<-[:OVERRIDES*0..]-(impl:Method)
+                            WHERE NOT impl.isAbstract
+                            RETURN impl.signature AS impl
+                            """, Map.of("caller", checkout + "#checkout(Ljava/lang/String;)V"))
+                    .list(r -> r.get("impl").asString());
+            assertThat(resolved).containsExactly(card + "#pay(Ljava/lang/String;)V");
+        }
+    }
+
     // --- Fixtures ---
 
     private static AnalysisResult sampleResult() {
@@ -211,19 +340,35 @@ class Neo4jGraphRepositoryIT {
     }
 
     private static JavaClass clazz(String fqcn, String... interfaces) {
-        return new JavaClass(fqcn, simpleName(fqcn), false, List.of(interfaces));
+        return new JavaClass(fqcn, simpleName(fqcn), ClassKind.CLASS, false, null, List.of(interfaces));
     }
 
-    private static JavaClass iface(String fqcn) {
-        return new JavaClass(fqcn, simpleName(fqcn), true, List.of());
+    private static JavaClass abstractClazz(String fqcn, String... interfaces) {
+        return new JavaClass(fqcn, simpleName(fqcn), ClassKind.CLASS, true, null, List.of(interfaces));
+    }
+
+    private static JavaClass subclass(String fqcn, String superClass) {
+        return new JavaClass(fqcn, simpleName(fqcn), ClassKind.CLASS, false, superClass, List.of());
+    }
+
+    private static JavaClass iface(String fqcn, String... superInterfaces) {
+        return new JavaClass(fqcn, simpleName(fqcn), ClassKind.INTERFACE, true, null, List.of(superInterfaces));
     }
 
     private static JavaMethod method(String ownerFqcn, String name) {
-        return new JavaMethod(ownerFqcn, name, "()V", "void", List.of(), false);
+        return new JavaMethod(ownerFqcn, name, "()V", "void", List.of(), Visibility.PUBLIC, false, false, false);
+    }
+
+    private static JavaMethod abstractMethod(String ownerFqcn, String name) {
+        return new JavaMethod(ownerFqcn, name, "()V", "void", List.of(), Visibility.PUBLIC, false, true, false);
     }
 
     private static MethodCall call(JavaMethod caller, JavaMethod target) {
         return new MethodCall(caller.signature(), target.signature());
+    }
+
+    private static MethodOverride override(JavaMethod overriding, JavaMethod overridden) {
+        return new MethodOverride(overriding.signature(), overridden.signature());
     }
 
     private static String simpleName(String fqcn) {

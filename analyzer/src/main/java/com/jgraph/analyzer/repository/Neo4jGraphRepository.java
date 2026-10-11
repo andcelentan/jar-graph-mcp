@@ -2,6 +2,7 @@ package com.jgraph.analyzer.repository;
 
 import com.jgraph.analyzer.config.DatabaseConfig;
 import com.jgraph.analyzer.model.AnalysisResult;
+import com.jgraph.analyzer.model.JavaClass;
 import org.neo4j.driver.AuthTokens;
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.GraphDatabase;
@@ -10,6 +11,7 @@ import org.neo4j.driver.Session;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Stream;
 
 public class Neo4jGraphRepository implements GraphRepository {
 
@@ -74,21 +76,35 @@ public class Neo4jGraphRepository implements GraphRepository {
                 .map(c -> Map.<String, Object>of(
                         "fqcn", c.fqcn(),
                         "simpleName", c.simpleName() != null ? c.simpleName() : "",
-                        "isInterface", c.isInterface()
+                        "kind", c.kind().name(),
+                        "isAbstract", c.isAbstract()
                 ))
                 .toList();
 
-        // 2. Prepare [:IMPLEMENTS] relationships batch
+        // 2. Prepare [:EXTENDS] relationships batch: class -> superclass, interface -> superinterfaces
+        List<Map<String, Object>> extendsBatch = result.classes().stream()
+                .flatMap(c -> {
+                    Stream<String> supertypes = c.isInterface()
+                            ? interfacesOf(c).stream()
+                            : Stream.ofNullable(c.superClass());
+                    return supertypes.map(superFqcn -> Map.<String, Object>of(
+                            "subFqcn", c.fqcn(),
+                            "superFqcn", superFqcn
+                    ));
+                })
+                .toList();
+
+        // 3. Prepare [:IMPLEMENTS] relationships batch: class -> interfaces (never interface -> interface)
         List<Map<String, Object>> implementsBatch = result.classes().stream()
-                .filter(c -> c.interfaces() != null && !c.interfaces().isEmpty())
-                .flatMap(c -> c.interfaces().stream()
+                .filter(c -> !c.isInterface())
+                .flatMap(c -> interfacesOf(c).stream()
                         .map(ifaceFqcn -> Map.<String, Object>of(
                                 "classFqcn", c.fqcn(),
                                 "interfaceFqcn", ifaceFqcn
                         )))
                 .toList();
 
-        // 3. Prepare Methods batch
+        // 4. Prepare Methods batch
         List<Map<String, Object>> methodBatch = result.methods().stream()
                 .map(m -> Map.<String, Object>of(
                         "signature", m.signature(),
@@ -97,11 +113,22 @@ public class Neo4jGraphRepository implements GraphRepository {
                         "ownerClassFqcn", m.ownerClassFqcn(),
                         "returnType", m.returnType() != null ? m.returnType() : "",
                         "parameterTypes", m.parameterTypes() != null ? m.parameterTypes() : List.of(),
+                        "visibility", m.visibility().name(),
+                        "isStatic", m.isStatic(),
+                        "isAbstract", m.isAbstract(),
                         "isTransactional", m.isTransactional()
                 ))
                 .toList();
 
-        // 4. Prepare [:CALLS] relationships batch (one row per distinct caller/target pair, not per call site)
+        // 5. Prepare [:OVERRIDES] relationships batch
+        List<Map<String, Object>> overrideBatch = result.overrides().stream()
+                .map(o -> Map.<String, Object>of(
+                        "overridingSignature", o.overridingSignature(),
+                        "overriddenSignature", o.overriddenSignature()
+                ))
+                .toList();
+
+        // 6. Prepare [:CALLS] relationships batch (one row per distinct caller/target pair, not per call site)
         List<Map<String, Object>> callBatch = result.calls().stream()
                 .distinct()
                 .map(call -> Map.<String, Object>of(
@@ -117,10 +144,19 @@ public class Neo4jGraphRepository implements GraphRepository {
                         UNWIND $batch AS row
                         MERGE (c:Class {fqcn: row.fqcn})
                         SET c.simpleName = row.simpleName,
-                            c.isInterface = row.isInterface
+                            c.kind = row.kind,
+                            c.isAbstract = row.isAbstract
                     """, classBatch);
 
-            // Step 2: Ingest [:IMPLEMENTS] relationships (creates interface stub if external)
+            // Step 2: Ingest [:EXTENDS] relationships (creates supertype stub if external)
+            writeInChunks(session, """
+                        UNWIND $batch AS row
+                        MATCH (c:Class {fqcn: row.subFqcn})
+                        MERGE (s:Class {fqcn: row.superFqcn})
+                        MERGE (c)-[:EXTENDS]->(s)
+                    """, extendsBatch);
+
+            // Step 3: Ingest [:IMPLEMENTS] relationships (creates interface stub if external)
             writeInChunks(session, """
                         UNWIND $batch AS row
                         MATCH (c:Class {fqcn: row.classFqcn})
@@ -128,7 +164,7 @@ public class Neo4jGraphRepository implements GraphRepository {
                         MERGE (c)-[:IMPLEMENTS]->(i)
                     """, implementsBatch);
 
-            // Step 3: Ingest Method nodes and bind to owner Class
+            // Step 4: Ingest Method nodes and bind to owner Class
             writeInChunks(session, """
                         UNWIND $batch AS row
                         MERGE (m:Method {signature: row.signature})
@@ -136,13 +172,24 @@ public class Neo4jGraphRepository implements GraphRepository {
                             m.descriptor = row.descriptor,
                             m.returnType = row.returnType,
                             m.parameterTypes = row.parameterTypes,
+                            m.visibility = row.visibility,
+                            m.isStatic = row.isStatic,
+                            m.isAbstract = row.isAbstract,
                             m.isTransactional = row.isTransactional
                         WITH m, row
                         MATCH (c:Class {fqcn: row.ownerClassFqcn})
                         MERGE (c)-[:DECLARES]->(m)
                     """, methodBatch);
 
-            // Step 4: Ingest [:CALLS] relationships (creates method stub if external/JDK)
+            // Step 5: Ingest [:OVERRIDES] relationships (both methods belong to the analyzed artifact)
+            writeInChunks(session, """
+                        UNWIND $batch AS row
+                        MATCH (overriding:Method {signature: row.overridingSignature})
+                        MATCH (overridden:Method {signature: row.overriddenSignature})
+                        MERGE (overriding)-[:OVERRIDES]->(overridden)
+                    """, overrideBatch);
+
+            // Step 6: Ingest [:CALLS] relationships (creates method stub if external/JDK)
             writeInChunks(session, """
                         UNWIND $batch AS row
                         MATCH (caller:Method {signature: row.callerSignature})
@@ -150,6 +197,10 @@ public class Neo4jGraphRepository implements GraphRepository {
                         MERGE (caller)-[:CALLS]->(target)
                     """, callBatch);
         }
+    }
+
+    private static List<String> interfacesOf(JavaClass javaClass) {
+        return javaClass.interfaces() != null ? javaClass.interfaces() : List.of();
     }
 
     /**

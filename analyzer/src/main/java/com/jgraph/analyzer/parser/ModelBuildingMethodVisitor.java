@@ -2,6 +2,7 @@ package com.jgraph.analyzer.parser;
 
 import com.jgraph.analyzer.model.JavaMethod;
 import com.jgraph.analyzer.model.MethodCall;
+import com.jgraph.analyzer.model.Visibility;
 import org.objectweb.asm.AnnotationVisitor;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
@@ -16,6 +17,7 @@ public class ModelBuildingMethodVisitor extends MethodVisitor {
     private final List<MethodCall> calls;
 
     private final String ownerClassFqcn;
+    private final int access;
     private final String methodName;
     private final String descriptor;
     private final String callerSignature;
@@ -25,12 +27,14 @@ public class ModelBuildingMethodVisitor extends MethodVisitor {
     public ModelBuildingMethodVisitor(List<JavaMethod> methods,
                                       List<MethodCall> calls,
                                       String ownerClassFqcn,
+                                      int access,
                                       String methodName,
                                       String descriptor) {
         super(Opcodes.ASM9);
         this.methods = methods;
         this.calls = calls;
         this.ownerClassFqcn = ownerClassFqcn;
+        this.access = access;
         this.methodName = methodName;
         this.descriptor = descriptor;
         this.callerSignature = ownerClassFqcn + "#" + methodName + descriptor;
@@ -63,7 +67,23 @@ public class ModelBuildingMethodVisitor extends MethodVisitor {
                 this.descriptor,
                 returnType,
                 parameterTypes,
+                visibility(this.access),
+                (this.access & Opcodes.ACC_STATIC) != 0,
+                (this.access & Opcodes.ACC_ABSTRACT) != 0,
                 this.isTransactional
         ));
+    }
+
+    private static Visibility visibility(int access) {
+        if ((access & Opcodes.ACC_PUBLIC) != 0) {
+            return Visibility.PUBLIC;
+        }
+        if ((access & Opcodes.ACC_PROTECTED) != 0) {
+            return Visibility.PROTECTED;
+        }
+        if ((access & Opcodes.ACC_PRIVATE) != 0) {
+            return Visibility.PRIVATE;
+        }
+        return Visibility.PACKAGE_PRIVATE;
     }
 }
