@@ -7,6 +7,7 @@ import com.jgraph.analyzer.model.JavaMethod;
 import com.jgraph.analyzer.parser.JarReader;
 import com.jgraph.analyzer.repository.GraphRepository;
 import com.jgraph.analyzer.repository.Neo4jGraphRepository;
+import com.jgraph.analyzer.resolver.OverrideResolver;
 import org.neo4j.driver.exceptions.Neo4jException;
 
 import java.io.IOException;
@@ -33,8 +34,10 @@ public class AppAnalyzer {
 
         try (JarFile jarFile = new JarFile(path.toFile())) {
             JarReader reader = new JarReader(jarFile);
-            AnalysisResult result = reader.readAndBuildModel();
-            System.out.printf("Bytecode parsed successfully: %d classes found.%n", result.classes().size());
+            AnalysisResult parsed = reader.readAndBuildModel();
+            System.out.printf("Bytecode parsed successfully: %d classes found.%n", parsed.classes().size());
+
+            AnalysisResult result = new OverrideResolver().resolve(parsed);
 
             System.out.println("Connecting to Neo4j and persisting graph...");
             try(GraphRepository repository = new Neo4jGraphRepository(DatabaseConfig.load())) {
@@ -64,6 +67,7 @@ public class AppAnalyzer {
         System.out.printf("Total classes:         %d (%d interfaces)%n", result.classes().size(), interfaceCount);
         System.out.printf("Total methods:         %d (%d @Transactional)%n", result.methods().size(), transactionalCount);
         System.out.printf("Invocations [:CALLS]:  %d%n", result.calls().size());
+        System.out.printf("Overrides:             %d%n", result.overrides().size());
         System.out.println("========================================");
     }
 }

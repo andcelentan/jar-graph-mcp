@@ -1,0 +1,358 @@
+package com.jgraph.analyzer.resolver;
+
+import com.jgraph.analyzer.model.AnalysisResult;
+import com.jgraph.analyzer.model.ClassKind;
+import com.jgraph.analyzer.model.JavaClass;
+import com.jgraph.analyzer.model.JavaMethod;
+import com.jgraph.analyzer.model.MethodCall;
+import com.jgraph.analyzer.model.MethodOverride;
+import com.jgraph.analyzer.model.Visibility;
+import com.jgraph.analyzer.parser.HierarchyFixture;
+import com.jgraph.analyzer.parser.JarReader;
+import com.jgraph.analyzer.parser.TestJars;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.jar.JarFile;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * Specification of {@link OverrideResolver} (ADR-0006). Each test builds a small hierarchy by hand and states
+ * exactly which overrides must be found: an unexpected extra override fails the test as much as a missing one.
+ */
+class OverrideResolverTest {
+
+    private final OverrideResolver resolver = new OverrideResolver();
+
+    // --- Basic linking ---
+
+    @Test
+    void shouldLinkClassMethodToImplementedInterfaceMethod() {
+        JavaClass api = iface("com/acme/Api");
+        JavaClass impl = clazz("com/acme/Impl", null, api.fqcn());
+        JavaMethod apiRun = method(api.fqcn(), "run");
+        JavaMethod implRun = method(impl.fqcn(), "run");
+
+        assertThat(resolveOverrides(List.of(api, impl), List.of(apiRun, implRun)))
+                .containsExactly(override(implRun, apiRun));
+    }
+
+    @Test
+    void shouldLinkSubclassMethodToSuperclassMethod() {
+        JavaClass base = clazz("com/acme/Base", null);
+        JavaClass sub = clazz("com/acme/Sub", base.fqcn());
+        JavaMethod baseRun = method(base.fqcn(), "run");
+        JavaMethod subRun = method(sub.fqcn(), "run");
+
+        assertThat(resolveOverrides(List.of(base, sub), List.of(baseRun, subRun)))
+                .containsExactly(override(subRun, baseRun));
+    }
+
+    @Test
+    void shouldLinkInterfaceMethodsAlongInterfaceInheritance() {
+        JavaClass api = iface("com/acme/Api");
+        JavaClass subApi = iface("com/acme/SubApi", api.fqcn());
+        JavaMethod apiRun = method(api.fqcn(), "run");
+        JavaMethod subApiRun = method(subApi.fqcn(), "run");
+
+        assertThat(resolveOverrides(List.of(api, subApi), List.of(apiRun, subApiRun)))
+                .containsExactly(override(subApiRun, apiRun));
+    }
+
+    // --- Nearest declaration ---
+
+    @Test
+    void shouldLinkOnlyToNearestDeclaration() {
+        JavaClass a = clazz("com/acme/A", null);
+        JavaClass b = clazz("com/acme/B", a.fqcn());
+        JavaClass c = clazz("com/acme/C", b.fqcn());
+        JavaMethod aRun = method(a.fqcn(), "run");
+        JavaMethod bRun = method(b.fqcn(), "run");
+        JavaMethod cRun = method(c.fqcn(), "run");
+
+        // C -> A is reachable transitively through B: it must not be stored
+        assertThat(resolveOverrides(List.of(a, b, c), List.of(aRun, bRun, cRun)))
+                .containsExactlyInAnyOrder(override(cRun, bRun), override(bRun, aRun));
+    }
+
+    @Test
+    void shouldSkipSupertypesThatDoNotDeclareTheMethod() {
+        JavaClass a = clazz("com/acme/A", null);
+        JavaClass b = clazz("com/acme/B", a.fqcn());
+        JavaClass c = clazz("com/acme/C", b.fqcn());
+        JavaMethod aRun = method(a.fqcn(), "run");
+        JavaMethod cRun = method(c.fqcn(), "run");
+
+        assertThat(resolveOverrides(List.of(a, b, c), List.of(aRun, cRun)))
+                .containsExactly(override(cRun, aRun));
+    }
+
+    @Test
+    void shouldResolveInterfaceMethodImplementedInSubclassOfAbstractClass() {
+        // The motivating case: the interface is implemented by the abstract base, the method by its subclass
+        JavaClass paymentService = iface("com/acme/PaymentService");
+        JavaClass base = abstractClazz("com/acme/AbstractPaymentService", null, paymentService.fqcn());
+        JavaClass card = clazz("com/acme/CardPaymentService", base.fqcn());
+        JavaMethod pay = method(paymentService.fqcn(), "pay");
+        JavaMethod cardPay = method(card.fqcn(), "pay");
+
+        assertThat(resolveOverrides(List.of(paymentService, base, card), List.of(pay, cardPay)))
+                .containsExactly(override(cardPay, pay));
+    }
+
+    @Test
+    void shouldResolveThroughSuperinterfaces() {
+        JavaClass api = iface("com/acme/Api");
+        JavaClass subApi = iface("com/acme/SubApi", api.fqcn());
+        JavaClass impl = clazz("com/acme/Impl", null, subApi.fqcn());
+        JavaMethod apiRun = method(api.fqcn(), "run");
+        JavaMethod implRun = method(impl.fqcn(), "run");
+
+        assertThat(resolveOverrides(List.of(api, subApi, impl), List.of(apiRun, implRun)))
+                .containsExactly(override(implRun, apiRun));
+    }
+
+    // --- Multiple paths ---
+
+    @Test
+    void shouldLinkToEveryPathThatDeclaresTheMethod() {
+        JavaClass first = iface("com/acme/First");
+        JavaClass second = iface("com/acme/Second");
+        JavaClass impl = clazz("com/acme/Impl", null, first.fqcn(), second.fqcn());
+        JavaMethod firstRun = method(first.fqcn(), "run");
+        JavaMethod secondRun = method(second.fqcn(), "run");
+        JavaMethod implRun = method(impl.fqcn(), "run");
+
+        assertThat(resolveOverrides(List.of(first, second, impl), List.of(firstRun, secondRun, implRun)))
+                .containsExactlyInAnyOrder(override(implRun, firstRun), override(implRun, secondRun));
+    }
+
+    @Test
+    void shouldNotDuplicateOverridesReachedThroughDiamond() {
+        //       Root (declares run)
+        //      /    \
+        //   Left    Right
+        //      \    /
+        //       Impl (declares run)
+        JavaClass root = iface("com/acme/Root");
+        JavaClass left = iface("com/acme/Left", root.fqcn());
+        JavaClass right = iface("com/acme/Right", root.fqcn());
+        JavaClass impl = clazz("com/acme/Impl", null, left.fqcn(), right.fqcn());
+        JavaMethod rootRun = method(root.fqcn(), "run");
+        JavaMethod implRun = method(impl.fqcn(), "run");
+
+        assertThat(resolveOverrides(List.of(root, left, right, impl), List.of(rootRun, implRun)))
+                .containsExactly(override(implRun, rootRun));
+    }
+
+    // --- Matching rules ---
+
+    @Test
+    void shouldMatchOnDescriptorNotJustName() {
+        JavaClass base = clazz("com/acme/Base", null);
+        JavaClass sub = clazz("com/acme/Sub", base.fqcn());
+        JavaMethod baseRun = method(base.fqcn(), "run", "(I)V", Visibility.PUBLIC, false);
+        JavaMethod subRun = method(sub.fqcn(), "run", "(Ljava/lang/String;)V", Visibility.PUBLIC, false);
+
+        // An overload, not an override
+        assertThat(resolveOverrides(List.of(base, sub), List.of(baseRun, subRun))).isEmpty();
+    }
+
+    @Test
+    void shouldMatchNamesCaseSensitively() {
+        JavaClass base = clazz("com/acme/Base", null);
+        JavaClass sub = clazz("com/acme/Sub", base.fqcn());
+        JavaMethod baseRun = method(base.fqcn(), "run");
+        JavaMethod subRun = method(sub.fqcn(), "Run");
+
+        // Java identifiers are case-sensitive: run() and Run() are different methods
+        assertThat(resolveOverrides(List.of(base, sub), List.of(baseRun, subRun))).isEmpty();
+    }
+
+    @Test
+    void shouldNeverOverridePrivateMethods() {
+        JavaClass base = clazz("com/acme/Base", null);
+        JavaClass sub = clazz("com/acme/Sub", base.fqcn());
+        JavaMethod baseRun = method(base.fqcn(), "run", "()V", Visibility.PRIVATE, false);
+        JavaMethod subRun = method(sub.fqcn(), "run");
+
+        assertThat(resolveOverrides(List.of(base, sub), List.of(baseRun, subRun))).isEmpty();
+    }
+
+    @Test
+    void shouldNotLinkStaticMethods() {
+        JavaClass base = clazz("com/acme/Base", null);
+        JavaClass sub = clazz("com/acme/Sub", base.fqcn());
+        JavaMethod baseUtility = method(base.fqcn(), "utility", "()V", Visibility.PUBLIC, true);
+        JavaMethod subUtility = method(sub.fqcn(), "utility", "()V", Visibility.PUBLIC, true);
+
+        // Hiding, not overriding
+        assertThat(resolveOverrides(List.of(base, sub), List.of(baseUtility, subUtility))).isEmpty();
+    }
+
+    @Test
+    void shouldNotLinkConstructorsOrStaticInitializers() {
+        JavaClass base = clazz("com/acme/Base", null);
+        JavaClass sub = clazz("com/acme/Sub", base.fqcn());
+        JavaMethod baseInit = method(base.fqcn(), "<init>");
+        JavaMethod subInit = method(sub.fqcn(), "<init>");
+        JavaMethod baseClinit = method(base.fqcn(), "<clinit>", "()V", Visibility.PACKAGE_PRIVATE, true);
+        JavaMethod subClinit = method(sub.fqcn(), "<clinit>", "()V", Visibility.PACKAGE_PRIVATE, true);
+
+        assertThat(resolveOverrides(List.of(base, sub), List.of(baseInit, subInit, baseClinit, subClinit))).isEmpty();
+    }
+
+    @Test
+    void shouldOverridePackagePrivateMethodsOnlyFromSamePackage() {
+        JavaClass base = clazz("com/acme/core/Base", null);
+        JavaClass samePackage = clazz("com/acme/core/SamePackage", base.fqcn());
+        JavaClass otherPackage = clazz("com/acme/other/OtherPackage", base.fqcn());
+        JavaMethod baseRun = method(base.fqcn(), "run", "()V", Visibility.PACKAGE_PRIVATE, false);
+        JavaMethod samePackageRun = method(samePackage.fqcn(), "run", "()V", Visibility.PACKAGE_PRIVATE, false);
+        JavaMethod otherPackageRun = method(otherPackage.fqcn(), "run", "()V", Visibility.PACKAGE_PRIVATE, false);
+
+        assertThat(resolveOverrides(
+                List.of(base, samePackage, otherPackage),
+                List.of(baseRun, samePackageRun, otherPackageRun)))
+                .containsExactly(override(samePackageRun, baseRun));
+    }
+
+    @Test
+    void shouldSkipIntermediatePackagePrivateDeclarationFromAnotherPackage() {
+        // p1.A.run (package-private) <- p2.B.run (package-private) <- p1.C.run
+        // C cannot override B.run (other package) but does override A.run (same package): the walk must go past B
+        JavaClass a = clazz("com/acme/p1/A", null);
+        JavaClass b = clazz("com/acme/p2/B", a.fqcn());
+        JavaClass c = clazz("com/acme/p1/C", b.fqcn());
+        JavaMethod aRun = method(a.fqcn(), "run", "()V", Visibility.PACKAGE_PRIVATE, false);
+        JavaMethod bRun = method(b.fqcn(), "run", "()V", Visibility.PACKAGE_PRIVATE, false);
+        JavaMethod cRun = method(c.fqcn(), "run", "()V", Visibility.PACKAGE_PRIVATE, false);
+
+        assertThat(resolveOverrides(List.of(a, b, c), List.of(aRun, bRun, cRun)))
+                .containsExactly(override(cRun, aRun));
+    }
+
+    @Test
+    void shouldReachPackagePrivateDeclarationTransitivelyThroughPublicRedeclaration() {
+        // JVMS §5.4.5: p1.A.run (package-private) <- p1.B.run (public) <- p2.C.run
+        // C overrides A.run only through B: stored as C -> B and B -> A
+        JavaClass a = clazz("com/acme/p1/A", null);
+        JavaClass b = clazz("com/acme/p1/B", a.fqcn());
+        JavaClass c = clazz("com/acme/p2/C", b.fqcn());
+        JavaMethod aRun = method(a.fqcn(), "run", "()V", Visibility.PACKAGE_PRIVATE, false);
+        JavaMethod bRun = method(b.fqcn(), "run");
+        JavaMethod cRun = method(c.fqcn(), "run");
+
+        assertThat(resolveOverrides(List.of(a, b, c), List.of(aRun, bRun, cRun)))
+                .containsExactlyInAnyOrder(override(cRun, bRun), override(bRun, aRun));
+    }
+
+    @Test
+    void shouldOverrideProtectedMethodsFromAnyPackage() {
+        JavaClass base = clazz("com/acme/core/Base", null);
+        JavaClass sub = clazz("com/acme/other/Sub", base.fqcn());
+        JavaMethod baseRun = method(base.fqcn(), "run", "()V", Visibility.PROTECTED, false);
+        JavaMethod subRun = method(sub.fqcn(), "run", "()V", Visibility.PROTECTED, false);
+
+        assertThat(resolveOverrides(List.of(base, sub), List.of(baseRun, subRun)))
+                .containsExactly(override(subRun, baseRun));
+    }
+
+    // --- Scope ---
+
+    @Test
+    void shouldIgnoreSupertypesOutsideTheArtifact() {
+        // Neither the superclass nor the interface belongs to the analyzed artifact: their methods are unknown
+        JavaClass task = clazz("com/acme/Task", "com/lib/ExternalBase", "java/lang/Runnable");
+        JavaMethod taskRun = method(task.fqcn(), "run");
+
+        assertThat(resolveOverrides(List.of(task), List.of(taskRun))).isEmpty();
+    }
+
+    @Test
+    void shouldKeepParsedModelUnchanged() {
+        JavaClass api = iface("com/acme/Api");
+        JavaClass impl = clazz("com/acme/Impl", null, api.fqcn());
+        JavaMethod apiRun = method(api.fqcn(), "run");
+        JavaMethod implRun = method(impl.fqcn(), "run");
+        AnalysisResult parsed = new AnalysisResult(
+                List.of(api, impl),
+                List.of(apiRun, implRun),
+                List.of(new MethodCall(implRun.signature(), apiRun.signature())));
+
+        AnalysisResult resolved = resolver.resolve(parsed);
+
+        assertThat(resolved.classes()).isEqualTo(parsed.classes());
+        assertThat(resolved.methods()).isEqualTo(parsed.methods());
+        assertThat(resolved.calls()).isEqualTo(parsed.calls());
+    }
+
+    // --- Real bytecode ---
+
+    @Test
+    void shouldResolveOverridesFromRealBytecode(@TempDir Path tempDir) throws IOException {
+        Path jarPath = TestJars.createJar(tempDir.resolve("hierarchy.jar"), HierarchyFixture.CLASSES);
+        AnalysisResult parsed;
+        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
+            parsed = new JarReader(jarFile).readAndBuildModel();
+        }
+
+        String paymentService = internalName(HierarchyFixture.PaymentService.class);
+        String audited = internalName(HierarchyFixture.AuditedPaymentService.class);
+        String base = internalName(HierarchyFixture.AbstractPaymentService.class);
+        String card = internalName(HierarchyFixture.CardPaymentService.class);
+
+        // Not expected: private secret(), static utility(), constructors
+        assertThat(resolver.resolve(parsed).overrides()).containsExactlyInAnyOrder(
+                new MethodOverride(card + "#pay(Ljava/lang/String;)V", paymentService + "#pay(Ljava/lang/String;)V"),
+                new MethodOverride(card + "#log(Ljava/lang/String;)V", base + "#log(Ljava/lang/String;)V"),
+                new MethodOverride(base + "#refund(Ljava/lang/String;)V", paymentService + "#refund(Ljava/lang/String;)V"),
+                new MethodOverride(base + "#audit(Ljava/lang/String;)V", audited + "#audit(Ljava/lang/String;)V"));
+    }
+
+    // --- Fixtures ---
+
+    private List<MethodOverride> resolveOverrides(List<JavaClass> classes, List<JavaMethod> methods) {
+        return resolver.resolve(new AnalysisResult(classes, methods, List.of())).overrides();
+    }
+
+    private static JavaClass clazz(String fqcn, String superClass, String... interfaces) {
+        return new JavaClass(fqcn, simpleName(fqcn), ClassKind.CLASS, false, superClass, List.of(interfaces));
+    }
+
+    private static JavaClass abstractClazz(String fqcn, String superClass, String... interfaces) {
+        return new JavaClass(fqcn, simpleName(fqcn), ClassKind.CLASS, true, superClass, List.of(interfaces));
+    }
+
+    private static JavaClass iface(String fqcn, String... superInterfaces) {
+        return new JavaClass(fqcn, simpleName(fqcn), ClassKind.INTERFACE, true, null, List.of(superInterfaces));
+    }
+
+    /**
+     * Public, non-static, no-arg method.
+     */
+    private static JavaMethod method(String ownerFqcn, String name) {
+        return method(ownerFqcn, name, "()V", Visibility.PUBLIC, false);
+    }
+
+    private static JavaMethod method(String ownerFqcn, String name, String descriptor,
+                                     Visibility visibility, boolean isStatic) {
+        return new JavaMethod(ownerFqcn, name, descriptor, "void", List.of(), visibility, isStatic, false, false);
+    }
+
+    private static MethodOverride override(JavaMethod overriding, JavaMethod overridden) {
+        return new MethodOverride(overriding.signature(), overridden.signature());
+    }
+
+    private static String simpleName(String fqcn) {
+        return fqcn.substring(fqcn.lastIndexOf('/') + 1);
+    }
+
+    private static String internalName(Class<?> clazz) {
+        return clazz.getName().replace('.', '/');
+    }
+}
