@@ -34,33 +34,50 @@ DB config: `analyzer/src/main/resources/application.properties`, overridden by e
 
 ## Analyzer architecture
 
-`AppAnalyzer` (CLI) → `JarReader` → `AnalysisResult` → `GraphRepository.initSchema()` / `deleteAll()` / `save()`.
+`AppAnalyzer` (CLI) → `JarReader` → `OverrideResolver` → `GraphRepository.initSchema()` / `deleteAll()` / `save()`,
+passing an `AnalysisResult` along (extract → transform → load).
 
 - `JarReader` feeds every top-level `.class` entry to **one shared** `ModelBuildingClassVisitor`, which appends to plain
   lists. Per method it creates a `ModelBuildingMethodVisitor` that emits a `MethodCall` per `visitMethodInsn` and the
   `JavaMethod` itself in `visitEnd`. The whole model is held in memory before persistence.
 - **Cross-file invariant:** the method signature string is built in two places, `JavaMethod.signature()` and
   `ModelBuildingMethodVisitor` (caller and call-target signatures). Both must stay `owner#name + descriptor`, or
-  `CALLS` stop matching declared methods.
+  `CALLS` stop matching declared methods; `OverrideResolver` also looks methods up by that format.
+- The parser only records facts written in each `.class` (local); `OverrideResolver` derives facts that need the whole
+  hierarchy (ADR-0006). It is stateless: per call it builds an adjacency list (type → superclass + interfaces) and a
+  signature index, then walks up depth-first per method, stopping at the nearest valid declaration on each path.
+  Overrides are not in bytecode (`@Override` has SOURCE retention), so they can only be derived.
 - `GraphRepository` is the persistence port (no Neo4j types, to keep a Neptune adapter possible);
   `Neo4jGraphRepository` is the only adapter. `save()` writes in client-side chunks, one `executeWrite` per chunk,
-  in dependency order: classes → `IMPLEMENTS` → methods (+ `DECLARES`) → `CALLS`. Later steps `MATCH` nodes created
-  by earlier ones. The `Driver` constructor is for tests/shared drivers, but `close()` still closes that driver.
-- Tests: `Neo4jGraphRepositoryIT` runs against `neo4j:5.26-community` via Testcontainers (no driver mocks) and uses the
+  in dependency order: classes → `EXTENDS` → `IMPLEMENTS` → methods (+ `DECLARES`) → `OVERRIDES` → `CALLS`. Later
+  steps `MATCH` nodes created by earlier ones. The `Driver` constructor is for tests/shared drivers, but `close()` still
+  closes that driver.
+- Tests: `OverrideResolverTest` is the resolver's specification (hand-built hierarchies + real javac bytecode).
+  `Neo4jGraphRepositoryIT` runs against `neo4j:5.26-community` via Testcontainers (no driver mocks) and uses the
   package-private `(Driver, chunkSize)` constructor with tiny chunks to cover chunk boundaries. `TestJars` builds JARs
-  from compiled test classes (`JarReaderTestFixture`).
+  from compiled test classes (`JarReaderTestFixture`, `HierarchyFixture`); keep fixtures free of generics and
+  covariant returns unless the test is about bridge methods.
 
 ### Graph model
 
 ```
-(:Class {fqcn, simpleName, isInterface})-[:IMPLEMENTS]->(:Class)
-(:Class)-[:DECLARES]->(:Method {signature, name, descriptor, returnType, parameterTypes, isTransactional})
+(:Class {fqcn, simpleName, kind, isAbstract})-[:EXTENDS]->(:Class)          class -> superclass, interface -> superinterface
+(:Class)-[:IMPLEMENTS]->(:Class)                                            class -> interface only
+(:Class)-[:DECLARES]->(:Method {signature, name, descriptor, returnType, parameterTypes,
+                                visibility, isStatic, isAbstract, isTransactional})
 (:Method)-[:CALLS]->(:Method)
+(:Method)-[:OVERRIDES]->(:Method)                                           nearest overridden declaration
 ```
 
 - `fqcn` is the JVM internal name (`com/acme/Foo`), while `returnType`/`parameterTypes` are dotted (`com.acme.Foo`).
-- Types/methods referenced but not in the analyzed artifact (JDK, libraries) become stub nodes with no `DECLARES`.
-- `CALLS` targets the static receiver type from the bytecode (often an interface), not the runtime implementation.
+- Types/methods referenced but not included in the analysis (JDK, libraries) become stub nodes with no `DECLARES`.
+- `kind`: `CLASS`, `INTERFACE`, `ENUM`, `RECORD`, `ANNOTATION` (`ClassKind`; `isInterface()` is derived from it).
+  Implicit supertypes (`java/lang/Object`, `Record`, `Enum`, `annotation/Annotation`) are never linked (supernodes);
+  `JavaClass.superClass` is null for interfaces and when the superclass is implicit.
+- `CALLS` targets the static receiver type from the bytecode (often an interface); resolve the code that runs with
+  `(caller)-[:CALLS]->(declared)<-[:OVERRIDES*0..]-(impl) WHERE NOT impl.isAbstract`.
+- `OVERRIDES` only links types included in the analysis (`result.classes()`), not the artifact layout; generic
+  overrides currently resolve to bridge methods.
 
 ## Working agreement
 
@@ -86,7 +103,10 @@ persistence, graph model, configuration or test strategy.
 - `ClassFileSource` abstraction (separate PR): recurse into nested archives (Spring Boot fat jar, WAR, EAR), package
   include filter, skip `META-INF/versions/**`, first-wins on duplicate classes. Input is the CI build artifact
   (ADR-0002); multi-JAR inputs and `target/classes` dirs are out of scope unless a new ADR says otherwise.
+- Bridge methods (next, ADR-0007): read `ACC_BRIDGE`, record the single call in the bridge body as its target, move
+  `OVERRIDES` from the bridge to the target and drop the bridge node. Only bridges, not all synthetic methods (lambda
+  bodies are synthetic but hold user code). Defensive: if the body has not exactly one same-name call, keep the bridge.
 - Parser fidelity: `invokedynamic` (lambda/method-ref call chains), exact `@Transactional` descriptors + class-level
-  annotation, `[:EXTENDS]` from `superName`, consistent type naming.
+  annotation, consistent type naming.
 - Repository: mark stub nodes (`external = true`); driver ownership in `close()`.
 - CLI: non-zero exit codes on failure (ECS/Fargate job status), fail-fast connectivity check.

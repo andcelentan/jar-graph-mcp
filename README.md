@@ -24,14 +24,16 @@ reflects the latest build of the application, internal dependencies included.
 
 ```mermaid
 flowchart LR
-    JAR[".jar"] --> A["analyzer<br/>bytecode parsing (ASM)"]
+    JAR[".jar"] --> A["analyzer<br/>bytecode parsing (ASM)<br/>+ override resolution"]
     A --> N[("Neo4j<br/>knowledge graph")]
     N -.-> M["mcp-server<br/>(planned)"]
     M -.-> AI["AI assistant / IDE"]
 ```
 
 1. **Analyzer**: reads the `.class` files of a JAR with [ASM](https://asm.ow2.io/) and extracts classes, interfaces,
-   methods, method calls and `@Transactional` markers, straight from bytecode (no source code needed).
+   inheritance, methods, method calls and `@Transactional` markers, straight from bytecode (no source code needed).
+   It then works out which methods override which, so that a call to an interface can be followed to the code that
+   actually runs.
 2. **Knowledge graph**: the model is persisted to Neo4j as nodes and relationships, queryable with Cypher.
 3. **MCP server** _(planned)_: exposes graph traversals to AI assistants through the
    [Model Context Protocol](https://modelcontextprotocol.io/), so the IDE can fetch the exact context of the code
@@ -43,8 +45,10 @@ flowchart LR
 |-----------|--------|
 | Bytecode parser (classes, interfaces, methods, calls, `@Transactional`) | ✅ Done |
 | Neo4j persistence (chunked writes, integration-tested with Testcontainers) | ✅ Done |
-| Nested archives (Spring Boot fat jar, WAR, EAR) | 🚧 Next |
-| Parser fidelity (lambdas / method references, class inheritance) | 📋 Planned |
+| Inheritance and override resolution (abstract classes, interface hierarchies) | ✅ Done |
+| Generic bridge methods | 🚧 Next |
+| Nested archives (Spring Boot fat jar, WAR, EAR) | 📋 Planned |
+| Parser fidelity (lambdas / method references) | 📋 Planned |
 | MCP server | 📋 Planned |
 | AWS deployment | 📋 Planned |
 
@@ -88,14 +92,21 @@ MATCH (:Method {name: 'main'})-[:CALLS*1..2]->(m:Method)<-[:DECLARES]-(:Class)
 RETURN DISTINCT m.signature AS reachable
 ```
 
-Bytecode records calls against the declared type (often an interface). Resolve them to the implementation through
-`IMPLEMENTS`:
+Bytecode records calls against the declared type (often an interface). Follow `OVERRIDES` to the code that actually
+runs, including methods inherited from abstract base classes:
 
 ```cypher
-MATCH (caller:Method)-[:CALLS]->(declared:Method {name: 'save'})<-[:DECLARES]-(:Class)
-      <-[:IMPLEMENTS]-(:Class)-[:DECLARES]->(impl:Method)
-WHERE impl.name = declared.name AND impl.descriptor = declared.descriptor
+MATCH (caller:Method)-[:CALLS]->(declared:Method {name: 'save'})<-[:OVERRIDES*0..]-(impl:Method)
+WHERE NOT impl.isAbstract
 RETURN caller.signature AS caller, impl.signature AS resolvedTarget
+```
+
+Which classes extend a library type?
+
+```cypher
+MATCH (c:Class)-[:EXTENDS]->(s:Class)
+WHERE s.fqcn STARTS WITH 'org/objectweb/asm/'
+RETURN c.fqcn AS class, s.fqcn AS superclass
 ```
 
 Which library or JDK methods does a class depend on?
@@ -109,21 +120,31 @@ RETURN m.name AS method, collect(DISTINCT ext.signature) AS externalCalls
 ## Graph model
 
 ```
-(:Class {fqcn, simpleName, isInterface})-[:IMPLEMENTS]->(:Class)
-(:Class)-[:DECLARES]->(:Method {signature, name, descriptor, returnType, parameterTypes, isTransactional})
+(:Class {fqcn, simpleName, kind, isAbstract})-[:EXTENDS]->(:Class)             class -> superclass, interface -> superinterface
+(:Class)-[:IMPLEMENTS]->(:Class)                                               class -> interface
+(:Class)-[:DECLARES]->(:Method {signature, name, descriptor, returnType, parameterTypes,
+                                visibility, isStatic, isAbstract, isTransactional})
 (:Method)-[:CALLS]->(:Method)
+(:Method)-[:OVERRIDES]->(:Method)                                              nearest overridden declaration
 ```
 
 - `fqcn` is the JVM internal name (`com/acme/OrderService`); `signature` is `owner#name + descriptor`, unique even
   across overloads.
-- Classes and methods referenced but not part of the analyzed JAR (JDK, libraries) appear as nodes without a
+- Classes and methods referenced but not included in the analysis (JDK, libraries) appear as nodes without a
   `DECLARES` relationship.
+- `kind` is one of `CLASS`, `INTERFACE`, `ENUM`, `RECORD`, `ANNOTATION`. Supertypes added implicitly by the compiler
+  (`java/lang/Object`, `Record`, `Enum`, `annotation/Annotation`) are not linked: they would only add supernodes.
+- `OVERRIDES` follows the Java rules (no static, private or constructor overrides; package-private only within the same
+  package) and is computed at ingestion time ([ADR-0006](docs/adr/0006-resolve-overrides-at-ingestion.md)).
 
 ### Known limitations
 
-- `CALLS` points to the type declared at the call site, not the runtime implementation (see the query above).
+- `CALLS` points to the type declared at the call site; resolving the runtime implementation needs `OVERRIDES`
+  (see the query above).
+- Overrides of generic methods are misresolved: the matching method is a compiler-generated bridge.
+- Methods of JDK or library supertypes are unknown, so implementing them (e.g. `Comparable#compareTo`) creates no
+  `OVERRIDES` relationship.
 - Calls through lambdas and method references (`invokedynamic`) are not captured yet.
-- Superclass relationships are not modelled yet; only `IMPLEMENTS`.
 - Only top-level `.class` entries are read: classes inside nested JARs are not analyzed yet.
 
 ## Architecture decisions
