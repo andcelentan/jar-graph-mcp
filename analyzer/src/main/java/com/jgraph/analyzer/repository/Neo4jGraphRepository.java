@@ -105,18 +105,20 @@ public class Neo4jGraphRepository implements GraphRepository {
                 .toList();
 
         // 4. Prepare Methods batch
+        // Map.of stops at 10 entries: method rows use Map.ofEntries
         List<Map<String, Object>> methodBatch = result.methods().stream()
-                .map(m -> Map.<String, Object>of(
-                        "signature", m.signature(),
-                        "name", m.name(),
-                        "descriptor", m.descriptor(),
-                        "ownerClassFqcn", m.ownerClassFqcn(),
-                        "returnType", m.returnType() != null ? m.returnType() : "",
-                        "parameterTypes", m.parameterTypes() != null ? m.parameterTypes() : List.of(),
-                        "visibility", m.visibility().name(),
-                        "isStatic", m.isStatic(),
-                        "isAbstract", m.isAbstract(),
-                        "isTransactional", m.isTransactional()
+                .map(m -> Map.<String, Object>ofEntries(
+                        Map.entry("signature", m.signature()),
+                        Map.entry("name", m.name()),
+                        Map.entry("descriptor", m.descriptor()),
+                        Map.entry("ownerClassFqcn", m.ownerClassFqcn()),
+                        Map.entry("returnType", m.returnType() != null ? m.returnType() : ""),
+                        Map.entry("parameterTypes", m.parameterTypes() != null ? m.parameterTypes() : List.of()),
+                        Map.entry("visibility", m.visibility().name()),
+                        Map.entry("isStatic", m.isStatic()),
+                        Map.entry("isAbstract", m.isAbstract()),
+                        Map.entry("isBridge", m.isBridge()),
+                        Map.entry("isTransactional", m.isTransactional())
                 ))
                 .toList();
 
@@ -175,6 +177,7 @@ public class Neo4jGraphRepository implements GraphRepository {
                             m.visibility = row.visibility,
                             m.isStatic = row.isStatic,
                             m.isAbstract = row.isAbstract,
+                            m.isBridge = row.isBridge,
                             m.isTransactional = row.isTransactional
                         WITH m, row
                         MATCH (c:Class {fqcn: row.ownerClassFqcn})
