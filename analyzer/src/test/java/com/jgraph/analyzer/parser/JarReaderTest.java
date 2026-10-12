@@ -147,6 +147,45 @@ class JarReaderTest {
                 });
     }
 
+    @Test
+    void shouldFlagBridgeMethods() throws IOException {
+        Path jarPath = TestJars.createJar(tempDir.resolve("bridges.jar"), BridgeFixture.CLASSES);
+
+        AnalysisResult result;
+        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
+            result = new JarReader(jarFile).readAndBuildModel();
+        }
+
+        String order = "L" + internalName(BridgeFixture.Order.class) + ";";
+        String invoice = "L" + internalName(BridgeFixture.Invoice.class) + ";";
+        String entity = "L" + internalName(BridgeFixture.Entity.class) + ";";
+        String animal = "L" + internalName(BridgeFixture.Animal.class) + ";";
+        String dog = "L" + internalName(BridgeFixture.Dog.class) + ";";
+
+        // The method written by the developer and the bridge javac generated next to it
+        assertThat(methodOf(result, BridgeFixture.OrderRepository.class, "save", "(" + order + ")V").isBridge())
+                .isFalse();
+        assertThat(methodOf(result, BridgeFixture.OrderRepository.class, "save", "(Ljava/lang/Object;)V").isBridge())
+                .isTrue();
+        assertThat(methodOf(result, BridgeFixture.InvoiceService.class, "persist", "(" + invoice + ")V").isBridge())
+                .isFalse();
+        assertThat(methodOf(result, BridgeFixture.InvoiceService.class, "persist", "(" + entity + ")V").isBridge())
+                .isTrue();
+        assertThat(methodOf(result, BridgeFixture.Dog.class, "copy", "()" + dog).isBridge()).isFalse();
+        assertThat(methodOf(result, BridgeFixture.Dog.class, "copy", "()" + animal).isBridge()).isTrue();
+        assertThat(methodOf(result, BridgeFixture.PublicFacade.class, "greet", "()V").isBridge()).isTrue();
+
+        assertThat(result.methods()).filteredOn(JavaMethod::isBridge).hasSize(4);
+    }
+
+    private static JavaMethod methodOf(AnalysisResult result, Class<?> owner, String name, String descriptor) {
+        return result.methods().stream()
+                .filter(m -> m.ownerClassFqcn().equals(internalName(owner))
+                        && m.name().equals(name)
+                        && m.descriptor().equals(descriptor))
+                .findFirst().orElseThrow();
+    }
+
     private static JavaClass classOf(AnalysisResult result, Class<?> clazz) {
         return result.classes().stream()
                 .filter(c -> c.fqcn().equals(internalName(clazz)))

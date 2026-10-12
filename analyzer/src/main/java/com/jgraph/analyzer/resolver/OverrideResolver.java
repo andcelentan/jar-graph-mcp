@@ -3,6 +3,7 @@ package com.jgraph.analyzer.resolver;
 import com.jgraph.analyzer.model.AnalysisResult;
 import com.jgraph.analyzer.model.JavaClass;
 import com.jgraph.analyzer.model.JavaMethod;
+import com.jgraph.analyzer.model.MethodCall;
 import com.jgraph.analyzer.model.MethodOverride;
 import com.jgraph.analyzer.model.Visibility;
 
@@ -14,7 +15,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Derives method overrides from the complete parsed model, before persistence (see ADR-0006).
+ * Derives method overrides from the complete parsed model, before persistence (see ADR-0006 and ADR-0007).
  *
  * <p>Rules (JLS §8.4.8.1), applied only to types that belong to the analyzed artifact:
  * <ul>
@@ -24,7 +25,9 @@ import java.util.Set;
  *     <li>a private method is never overridden;</li>
  *     <li>a package-private method is only overridden from the same package;</li>
  *     <li>a method points to the nearest matching declaration along every supertype path (superclass and
- *         interfaces); farther declarations are reached transitively, through the nearest one.</li>
+ *         interfaces); farther declarations are reached transitively, through the nearest one;</li>
+ *     <li>an override found for a bridge method is attributed to the method it forwards to, unless that would make
+ *         a method override itself (visibility bridges).</li>
  * </ul>
  */
 public final class OverrideResolver {
@@ -76,13 +79,23 @@ public final class OverrideResolver {
     }
 
     /**
+     * Method name of a {@link JavaMethod#signature()}: {@code owner#name(descriptor)}.
+     */
+    private static String nameOf(String signature) {
+        return signature.substring(signature.indexOf('#') + 1, signature.indexOf('('));
+    }
+
+    /**
      * Indexes over the parsed model, built once per {@link #resolve} call so that the resolver stays stateless.
      *
      * @param supertypesByType   adjacency list: type -> direct supertypes (superclass and interfaces)
      * @param methodsBySignature method lookup by {@link JavaMethod#signature()}
+     * @param bridgedByBridge    bridge signature -> signature of the method it forwards to; only bridges whose body
+     *                           calls exactly one distinct method with the same name (ADR-0007)
      */
     private record TypeHierarchy(Map<String, List<String>> supertypesByType,
-                                 Map<String, JavaMethod> methodsBySignature) {
+                                 Map<String, JavaMethod> methodsBySignature,
+                                 Map<String, String> bridgedByBridge) {
 
         static TypeHierarchy of(AnalysisResult result) {
             Map<String, List<String>> supertypesByType = new HashMap<>();
@@ -101,7 +114,31 @@ public final class OverrideResolver {
                 methodsBySignature.putIfAbsent(method.signature(), method);
             }
 
-            return new TypeHierarchy(supertypesByType, methodsBySignature);
+            return new TypeHierarchy(supertypesByType, methodsBySignature, bridgedMethods(result, methodsBySignature));
+        }
+
+        /**
+         * One pass over the calls: for every bridge, the distinct same-name methods called from its body. Only
+         * bridges with exactly one such target are kept; any other bridge is treated as a regular method.
+         */
+        private static Map<String, String> bridgedMethods(AnalysisResult result,
+                                                          Map<String, JavaMethod> methodsBySignature) {
+            Map<String, Set<String>> targetsByBridge = new HashMap<>();
+            for (MethodCall call : result.calls()) {
+                JavaMethod caller = methodsBySignature.get(call.callerSignature());
+                if (caller != null && caller.isBridge() && caller.name().equals(nameOf(call.targetSignature()))) {
+                    targetsByBridge.computeIfAbsent(caller.signature(), bridge -> new HashSet<>())
+                            .add(call.targetSignature());
+                }
+            }
+
+            Map<String, String> bridgedByBridge = new HashMap<>();
+            targetsByBridge.forEach((bridge, targets) -> {
+                if (targets.size() == 1) {
+                    bridgedByBridge.put(bridge, targets.iterator().next());
+                }
+            });
+            return bridgedByBridge;
         }
 
         /**
@@ -116,7 +153,12 @@ public final class OverrideResolver {
                 }
                 JavaMethod candidate = methodsBySignature.get(supertype + "#" + method.name() + method.descriptor());
                 if (candidate != null && isOverriddenBy(candidate, method)) {
-                    out.add(new MethodOverride(method.signature(), candidate.signature()));
+                    // A bridge never owns the override: the method it forwards to does (ADR-0007)
+                    String overriding = bridgedByBridge.getOrDefault(method.signature(), method.signature());
+                    // A visibility bridge forwards to the very method it overrides: no self-override
+                    if (!overriding.equals(candidate.signature())) {
+                        out.add(new MethodOverride(overriding, candidate.signature()));
+                    }
                 } else {
                     collectOverridden(method, supertype, visited, out);
                 }

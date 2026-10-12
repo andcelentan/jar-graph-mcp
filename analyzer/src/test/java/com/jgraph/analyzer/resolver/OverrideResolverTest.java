@@ -7,6 +7,7 @@ import com.jgraph.analyzer.model.JavaMethod;
 import com.jgraph.analyzer.model.MethodCall;
 import com.jgraph.analyzer.model.MethodOverride;
 import com.jgraph.analyzer.model.Visibility;
+import com.jgraph.analyzer.parser.BridgeFixture;
 import com.jgraph.analyzer.parser.HierarchyFixture;
 import com.jgraph.analyzer.parser.JarReader;
 import com.jgraph.analyzer.parser.TestJars;
@@ -291,7 +292,134 @@ class OverrideResolverTest {
         assertThat(resolved.calls()).isEqualTo(parsed.calls());
     }
 
+    // --- Bridge methods (ADR-0007) ---
+
+    @Test
+    void shouldAttributeGenericBridgeOverrideToBridgedMethod() {
+        // Repository<T>.save(T) erased to save(Object); OrderRepository.save(Order) gets a bridge save(Object)
+        JavaClass repository = iface("com/acme/Repository");
+        JavaClass orderRepository = clazz("com/acme/OrderRepository", null, repository.fqcn());
+        JavaMethod save = method(repository.fqcn(), "save", "(Ljava/lang/Object;)V", Visibility.PUBLIC, false);
+        JavaMethod saveOrder = method(orderRepository.fqcn(), "save", "(Lcom/acme/Order;)V", Visibility.PUBLIC, false);
+        JavaMethod bridge = bridge(orderRepository.fqcn(), "save", "(Ljava/lang/Object;)V");
+
+        assertThat(resolveOverrides(
+                List.of(repository, orderRepository),
+                List.of(save, saveOrder, bridge),
+                List.of(call(bridge, saveOrder))))
+                .containsExactly(override(saveOrder, save));
+    }
+
+    @Test
+    void shouldAttributeCovariantReturnBridgeOverrideToBridgedMethod() {
+        // Dog.copy() returns Dog while Animal.copy() returns Animal: the bridge keeps Animal's descriptor
+        JavaClass animal = clazz("com/acme/Animal", null);
+        JavaClass dog = clazz("com/acme/Dog", animal.fqcn());
+        JavaMethod animalCopy = method(animal.fqcn(), "copy", "()Lcom/acme/Animal;", Visibility.PUBLIC, false);
+        JavaMethod dogCopy = method(dog.fqcn(), "copy", "()Lcom/acme/Dog;", Visibility.PUBLIC, false);
+        JavaMethod bridge = bridge(dog.fqcn(), "copy", "()Lcom/acme/Animal;");
+
+        assertThat(resolveOverrides(
+                List.of(animal, dog),
+                List.of(animalCopy, dogCopy, bridge),
+                List.of(call(bridge, dogCopy))))
+                .containsExactly(override(dogCopy, animalCopy));
+    }
+
+    @Test
+    void shouldKeepDirectOverridesOfBridgedMethod() {
+        // save(Order) overrides OrderStore.save(Order) on its own, and Repository.save(Object) through the bridge
+        JavaClass repository = iface("com/acme/Repository");
+        JavaClass orderStore = iface("com/acme/OrderStore");
+        JavaClass orderRepository = clazz("com/acme/OrderRepository", null, repository.fqcn(), orderStore.fqcn());
+        JavaMethod save = method(repository.fqcn(), "save", "(Ljava/lang/Object;)V", Visibility.PUBLIC, false);
+        JavaMethod storeSave = method(orderStore.fqcn(), "save", "(Lcom/acme/Order;)V", Visibility.PUBLIC, false);
+        JavaMethod saveOrder = method(orderRepository.fqcn(), "save", "(Lcom/acme/Order;)V", Visibility.PUBLIC, false);
+        JavaMethod bridge = bridge(orderRepository.fqcn(), "save", "(Ljava/lang/Object;)V");
+
+        assertThat(resolveOverrides(
+                List.of(repository, orderStore, orderRepository),
+                List.of(save, storeSave, saveOrder, bridge),
+                List.of(call(bridge, saveOrder))))
+                .containsExactlyInAnyOrder(override(saveOrder, save), override(saveOrder, storeSave));
+    }
+
+    @Test
+    void shouldDropSelfOverrideOfVisibilityBridge() {
+        // PublicFacade (public) inherits greet() from HiddenBase (package-private): the bridge forwards to the very
+        // method it overrides, so attributing the override would give HiddenBase.greet -> HiddenBase.greet
+        JavaClass hiddenBase = clazz("com/acme/HiddenBase", null);
+        JavaClass facade = clazz("com/acme/PublicFacade", hiddenBase.fqcn());
+        JavaMethod greet = method(hiddenBase.fqcn(), "greet");
+        JavaMethod bridge = bridge(facade.fqcn(), "greet", "()V");
+
+        assertThat(resolveOverrides(
+                List.of(hiddenBase, facade),
+                List.of(greet, bridge),
+                List.of(call(bridge, greet))))
+                .isEmpty();
+    }
+
+    @Test
+    void shouldTreatBridgeWithoutSameNameCallAsRegularMethod() {
+        // Unexpected body (e.g. another compiler): no bridged method can be identified, so nothing is invented
+        JavaClass repository = iface("com/acme/Repository");
+        JavaClass orderRepository = clazz("com/acme/OrderRepository", null, repository.fqcn());
+        JavaMethod save = method(repository.fqcn(), "save", "(Ljava/lang/Object;)V", Visibility.PUBLIC, false);
+        JavaMethod log = method(orderRepository.fqcn(), "log");
+        JavaMethod bridge = bridge(orderRepository.fqcn(), "save", "(Ljava/lang/Object;)V");
+
+        assertThat(resolveOverrides(
+                List.of(repository, orderRepository),
+                List.of(save, log, bridge),
+                List.of(call(bridge, log))))
+                .containsExactly(override(bridge, save));
+    }
+
+    @Test
+    void shouldTreatBridgeWithSeveralSameNameCallsAsRegularMethod() {
+        // Two candidate targets: the bridged method is ambiguous, so nothing is invented
+        JavaClass repository = iface("com/acme/Repository");
+        JavaClass orderRepository = clazz("com/acme/OrderRepository", null, repository.fqcn());
+        JavaMethod save = method(repository.fqcn(), "save", "(Ljava/lang/Object;)V", Visibility.PUBLIC, false);
+        JavaMethod saveOrder = method(orderRepository.fqcn(), "save", "(Lcom/acme/Order;)V", Visibility.PUBLIC, false);
+        JavaMethod saveDraft = method(orderRepository.fqcn(), "save", "(Lcom/acme/Draft;)V", Visibility.PUBLIC, false);
+        JavaMethod bridge = bridge(orderRepository.fqcn(), "save", "(Ljava/lang/Object;)V");
+
+        assertThat(resolveOverrides(
+                List.of(repository, orderRepository),
+                List.of(save, saveOrder, saveDraft, bridge),
+                List.of(call(bridge, saveOrder), call(bridge, saveDraft))))
+                .containsExactly(override(bridge, save));
+    }
+
     // --- Real bytecode ---
+
+    @Test
+    void shouldAttributeBridgeOverridesFromRealBytecode(@TempDir Path tempDir) throws IOException {
+        Path jarPath = TestJars.createJar(tempDir.resolve("bridges.jar"), BridgeFixture.CLASSES);
+        AnalysisResult parsed;
+        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
+            parsed = new JarReader(jarFile).readAndBuildModel();
+        }
+
+        String repository = internalName(BridgeFixture.Repository.class);
+        String orderRepository = internalName(BridgeFixture.OrderRepository.class);
+        String crudService = internalName(BridgeFixture.AbstractCrudService.class);
+        String invoiceService = internalName(BridgeFixture.InvoiceService.class);
+        String animal = internalName(BridgeFixture.Animal.class);
+        String dog = internalName(BridgeFixture.Dog.class);
+        String order = "L" + internalName(BridgeFixture.Order.class) + ";";
+        String invoice = "L" + internalName(BridgeFixture.Invoice.class) + ";";
+        String entity = "L" + internalName(BridgeFixture.Entity.class) + ";";
+
+        // Every override starts from the method the developer wrote, never from a bridge;
+        // the visibility bridge PublicFacade.greet() produces no override at all
+        assertThat(resolver.resolve(parsed).overrides()).containsExactlyInAnyOrder(
+                new MethodOverride(orderRepository + "#save(" + order + ")V", repository + "#save(Ljava/lang/Object;)V"),
+                new MethodOverride(invoiceService + "#persist(" + invoice + ")V", crudService + "#persist(" + entity + ")V"),
+                new MethodOverride(dog + "#copy()L" + dog + ";", animal + "#copy()L" + animal + ";"));
+    }
 
     @Test
     void shouldResolveOverridesFromRealBytecode(@TempDir Path tempDir) throws IOException {
@@ -317,7 +445,12 @@ class OverrideResolverTest {
     // --- Fixtures ---
 
     private List<MethodOverride> resolveOverrides(List<JavaClass> classes, List<JavaMethod> methods) {
-        return resolver.resolve(new AnalysisResult(classes, methods, List.of())).overrides();
+        return resolveOverrides(classes, methods, List.of());
+    }
+
+    private List<MethodOverride> resolveOverrides(List<JavaClass> classes, List<JavaMethod> methods,
+                                                  List<MethodCall> calls) {
+        return resolver.resolve(new AnalysisResult(classes, methods, calls)).overrides();
     }
 
     private static JavaClass clazz(String fqcn, String superClass, String... interfaces) {
@@ -341,7 +474,18 @@ class OverrideResolverTest {
 
     private static JavaMethod method(String ownerFqcn, String name, String descriptor,
                                      Visibility visibility, boolean isStatic) {
-        return new JavaMethod(ownerFqcn, name, descriptor, "void", List.of(), visibility, isStatic, false, false);
+        return new JavaMethod(ownerFqcn, name, descriptor, "void", List.of(), visibility, isStatic, false, false, false);
+    }
+
+    /**
+     * Public bridge method, as generated by javac.
+     */
+    private static JavaMethod bridge(String ownerFqcn, String name, String descriptor) {
+        return new JavaMethod(ownerFqcn, name, descriptor, "void", List.of(), Visibility.PUBLIC, false, false, true, false);
+    }
+
+    private static MethodCall call(JavaMethod caller, JavaMethod target) {
+        return new MethodCall(caller.signature(), target.signature());
     }
 
     private static MethodOverride override(JavaMethod overriding, JavaMethod overridden) {

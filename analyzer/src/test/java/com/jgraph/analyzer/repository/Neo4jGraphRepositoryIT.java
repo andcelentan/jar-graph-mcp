@@ -7,6 +7,7 @@ import com.jgraph.analyzer.model.JavaMethod;
 import com.jgraph.analyzer.model.MethodCall;
 import com.jgraph.analyzer.model.MethodOverride;
 import com.jgraph.analyzer.model.Visibility;
+import com.jgraph.analyzer.parser.BridgeFixture;
 import com.jgraph.analyzer.parser.HierarchyFixture;
 import com.jgraph.analyzer.parser.JarReader;
 import com.jgraph.analyzer.parser.JarReaderTestFixture;
@@ -329,6 +330,35 @@ class Neo4jGraphRepositoryIT {
         }
     }
 
+    @Test
+    void shouldResolveGenericCallsToBridgedMethodNotToBridge(@TempDir Path tempDir) throws IOException {
+        Path jarPath = TestJars.createJar(tempDir.resolve("bridges.jar"), BridgeFixture.CLASSES);
+        AnalysisResult parsed;
+        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
+            parsed = new JarReader(jarFile).readAndBuildModel();
+        }
+
+        repository.save(new OverrideResolver().resolve(parsed));
+
+        // Bridges stay in the graph, flagged, and never own an OVERRIDES relationship (ADR-0007)
+        assertThat(count("MATCH (m:Method) WHERE m.isBridge RETURN count(m)")).isEqualTo(4);
+        assertThat(count("MATCH (m:Method)-[r:OVERRIDES]->() WHERE m.isBridge RETURN count(r)")).isZero();
+
+        // OrderController calls Repository#save(Object): the resolution query returns save(Order), not the bridge
+        String controller = internalName(BridgeFixture.OrderController.class);
+        String orderRepository = internalName(BridgeFixture.OrderRepository.class);
+        String order = "L" + internalName(BridgeFixture.Order.class) + ";";
+        try (Session session = driver.session()) {
+            List<String> resolved = session.run("""
+                            MATCH (:Method {signature: $caller})-[:CALLS]->(:Method)<-[:OVERRIDES*0..]-(impl:Method)
+                            WHERE NOT impl.isAbstract
+                            RETURN impl.signature AS impl
+                            """, Map.of("caller", controller + "#submit(" + order + ")V"))
+                    .list(r -> r.get("impl").asString());
+            assertThat(resolved).containsExactly(orderRepository + "#save(" + order + ")V");
+        }
+    }
+
     // --- Fixtures ---
 
     private static AnalysisResult sampleResult() {
@@ -356,11 +386,11 @@ class Neo4jGraphRepositoryIT {
     }
 
     private static JavaMethod method(String ownerFqcn, String name) {
-        return new JavaMethod(ownerFqcn, name, "()V", "void", List.of(), Visibility.PUBLIC, false, false, false);
+        return new JavaMethod(ownerFqcn, name, "()V", "void", List.of(), Visibility.PUBLIC, false, false, false, false);
     }
 
     private static JavaMethod abstractMethod(String ownerFqcn, String name) {
-        return new JavaMethod(ownerFqcn, name, "()V", "void", List.of(), Visibility.PUBLIC, false, true, false);
+        return new JavaMethod(ownerFqcn, name, "()V", "void", List.of(), Visibility.PUBLIC, false, true, false, false);
     }
 
     private static MethodCall call(JavaMethod caller, JavaMethod target) {

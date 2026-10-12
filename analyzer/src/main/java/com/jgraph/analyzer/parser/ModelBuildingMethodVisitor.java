@@ -70,6 +70,7 @@ public class ModelBuildingMethodVisitor extends MethodVisitor {
                 visibility(this.access),
                 (this.access & Opcodes.ACC_STATIC) != 0,
                 (this.access & Opcodes.ACC_ABSTRACT) != 0,
+                (this.access & Opcodes.ACC_BRIDGE) != 0,
                 this.isTransactional
         ));
     }
