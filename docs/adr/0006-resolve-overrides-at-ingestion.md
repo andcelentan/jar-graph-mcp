@@ -4,7 +4,7 @@ Date: 2026-10-10
 
 ## Status
 
-Accepted
+Accepted, amended by [ADR-0008](0008-point-calls-at-declared-method.md) (call resolution query)
 
 ## Context
 
