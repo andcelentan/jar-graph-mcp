@@ -1,5 +1,6 @@
 package com.jgraph.analyzer.parser;
 
+import com.jgraph.analyzer.model.Invocation;
 import com.jgraph.analyzer.model.JavaMethod;
 import com.jgraph.analyzer.model.MethodCall;
 import com.jgraph.analyzer.model.Visibility;
@@ -50,8 +51,19 @@ public class ModelBuildingMethodVisitor extends MethodVisitor {
 
     @Override
     public void visitMethodInsn(int opcode, String owner, String name, String targetDescriptor, boolean isInterface) {
+        // As written in bytecode: owner is the receiver's static type, resolved to the declaration later (ADR-0008)
         String targetSignature = owner + "#" + name + targetDescriptor;
-        this.calls.add(new MethodCall(this.callerSignature, targetSignature));
+        this.calls.add(new MethodCall(this.callerSignature, targetSignature, invocation(opcode), owner));
+    }
+
+    private static Invocation invocation(int opcode) {
+        return switch (opcode) {
+            case Opcodes.INVOKEVIRTUAL -> Invocation.VIRTUAL;
+            case Opcodes.INVOKEINTERFACE -> Invocation.INTERFACE;
+            case Opcodes.INVOKESPECIAL -> Invocation.SPECIAL;
+            case Opcodes.INVOKESTATIC -> Invocation.STATIC;
+            default -> throw new IllegalArgumentException("Not a method invocation opcode: " + opcode);
+        };
     }
 
     @Override

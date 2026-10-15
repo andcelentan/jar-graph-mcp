@@ -12,3 +12,4 @@ Format: [Michael Nygard's ADR](https://cognitect.com/blog/2011/11/15/documenting
 | [0005](0005-integration-tests-with-testcontainers.md) | Integration-test graph persistence against a real Neo4j | Accepted |
 | [0006](0006-resolve-overrides-at-ingestion.md) | Resolve inheritance and method overrides at ingestion time | Accepted |
 | [0007](0007-keep-bridge-methods-and-attribute-overrides.md) | Keep bridge methods and attribute their overrides to the bridged method | Accepted |
+| [0008](0008-point-calls-at-declared-method.md) | Point calls at the declared method and record how they are invoked | Accepted |

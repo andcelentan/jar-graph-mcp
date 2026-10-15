@@ -7,7 +7,7 @@ import com.jgraph.analyzer.model.JavaMethod;
 import com.jgraph.analyzer.parser.JarReader;
 import com.jgraph.analyzer.repository.GraphRepository;
 import com.jgraph.analyzer.repository.Neo4jGraphRepository;
-import com.jgraph.analyzer.resolver.OverrideResolver;
+import com.jgraph.analyzer.resolver.ModelResolver;
 import org.neo4j.driver.exceptions.Neo4jException;
 
 import java.io.IOException;
@@ -37,7 +37,7 @@ public class AppAnalyzer {
             AnalysisResult parsed = reader.readAndBuildModel();
             System.out.printf("Bytecode parsed successfully: %d classes found.%n", parsed.classes().size());
 
-            AnalysisResult result = new OverrideResolver().resolve(parsed);
+            AnalysisResult result = new ModelResolver().resolve(parsed);
 
             System.out.println("Connecting to Neo4j and persisting graph...");
             try(GraphRepository repository = new Neo4jGraphRepository(DatabaseConfig.load())) {

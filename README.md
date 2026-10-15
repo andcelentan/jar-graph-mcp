@@ -47,10 +47,10 @@ flowchart LR
 | Neo4j persistence (chunked writes, integration-tested with Testcontainers) | ✅ Done |
 | Inheritance and override resolution (abstract classes, interface hierarchies) | ✅ Done |
 | Bridge methods (generics, covariant return types) | ✅ Done |
-| Calls to inherited methods through a subclass reference | 🚧 Next |
+| Call resolution (inherited methods, `super` and static calls) | ✅ Done |
+| MCP server (first tools) | 🚧 Next |
 | Nested archives (Spring Boot fat jar, WAR, EAR) | 📋 Planned |
 | Parser fidelity (lambdas / method references) | 📋 Planned |
-| MCP server | 📋 Planned |
 | AWS deployment | 📋 Planned |
 
 ## Quick start
@@ -93,13 +93,14 @@ MATCH (:Method {name: 'main'})-[:CALLS*1..2]->(m:Method)<-[:DECLARES]-(:Class)
 RETURN DISTINCT m.signature AS reachable
 ```
 
-Bytecode records calls against the declared type (often an interface). Follow `OVERRIDES` to the code that actually
-runs, including methods inherited from abstract base classes:
+A call often targets an interface or an abstract method. Follow `OVERRIDES` to the code that may actually run, only
+for calls that dispatch at run time (not for `super` or static calls):
 
 ```cypher
-MATCH (caller:Method)-[:CALLS]->(declared:Method {name: 'save'})<-[:OVERRIDES*0..]-(impl:Method)
+MATCH (caller:Method)-[call:CALLS]->(declared:Method {name: 'save'})<-[:OVERRIDES*0..]-(impl:Method)
 WHERE NOT impl.isAbstract
-RETURN caller.signature AS caller, impl.signature AS resolvedTarget
+  AND (impl = declared OR call.invocation IN ['VIRTUAL', 'INTERFACE'])
+RETURN DISTINCT caller.signature AS caller, impl.signature AS resolvedTarget
 ```
 
 Which classes extend a library type?
@@ -125,7 +126,7 @@ RETURN m.name AS method, collect(DISTINCT ext.signature) AS externalCalls
 (:Class)-[:IMPLEMENTS]->(:Class)                                               class -> interface
 (:Class)-[:DECLARES]->(:Method {signature, name, descriptor, returnType, parameterTypes,
                                 visibility, isStatic, isAbstract, isBridge, isTransactional})
-(:Method)-[:CALLS]->(:Method)
+(:Method)-[:CALLS {invocation, receiver}]->(:Method)                          declared method that is called
 (:Method)-[:OVERRIDES]->(:Method)                                              nearest overridden declaration
 ```
 
@@ -141,13 +142,17 @@ RETURN m.name AS method, collect(DISTINCT ext.signature) AS externalCalls
   never own an `OVERRIDES`: it starts from the method the developer wrote
   ([ADR-0007](docs/adr/0007-keep-bridge-methods-and-attribute-overrides.md)). Queries that list methods should add
   `WHERE NOT m.isBridge`.
+- `CALLS` points to the method the call refers to in the source code, like the IDE's "Go to Declaration": for
+  `sub.inherited()` it is the superclass declaration, even though bytecode names the subclass. `receiver` keeps the
+  type named in bytecode, `invocation` the instruction (`VIRTUAL`, `INTERFACE`, `SPECIAL`, `STATIC`)
+  ([ADR-0008](docs/adr/0008-point-calls-at-declared-method.md)).
 
 ### Known limitations
 
-- `CALLS` points to the type declared at the call site; resolving the runtime implementation needs `OVERRIDES`
-  (see the query above).
-- A call to an inherited method through a subclass reference (`sub.inherited()`) points to a method the subclass does
-  not declare, not yet linked to the superclass declaration.
+- Virtual calls resolved to a superclass declaration also return overrides from sibling subclasses, which the receiver
+  can never be: a superset that always includes the right answer.
+- Methods inherited from outside the analysis (e.g. `name()` of an enum, methods of a framework superclass) stay on a
+  node named after the receiver, without `DECLARES`.
 - Calls that target a visibility bridge directly (a public class inheriting from a package-private one) resolve to the
   bridge, one `CALLS` away from the real method.
 - Methods of JDK or library supertypes are unknown, so implementing them (e.g. `Comparable#compareTo`) creates no
