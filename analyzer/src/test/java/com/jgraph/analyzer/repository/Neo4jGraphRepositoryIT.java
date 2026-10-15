@@ -2,18 +2,20 @@ package com.jgraph.analyzer.repository;
 
 import com.jgraph.analyzer.model.AnalysisResult;
 import com.jgraph.analyzer.model.ClassKind;
+import com.jgraph.analyzer.model.Invocation;
 import com.jgraph.analyzer.model.JavaClass;
 import com.jgraph.analyzer.model.JavaMethod;
 import com.jgraph.analyzer.model.MethodCall;
 import com.jgraph.analyzer.model.MethodOverride;
 import com.jgraph.analyzer.model.Visibility;
 import com.jgraph.analyzer.parser.BridgeFixture;
+import com.jgraph.analyzer.parser.CallFixture;
 import com.jgraph.analyzer.parser.HierarchyFixture;
 import com.jgraph.analyzer.parser.JarReader;
 import com.jgraph.analyzer.parser.JarReaderTestFixture;
 import com.jgraph.analyzer.parser.TestJars;
 import com.jgraph.analyzer.parser.TypeKindFixture;
-import com.jgraph.analyzer.resolver.OverrideResolver;
+import com.jgraph.analyzer.resolver.ModelResolver;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -140,7 +142,7 @@ class Neo4jGraphRepositoryIT {
         repository.save(new AnalysisResult(
                 List.of(service),
                 List.of(log),
-                List.of(new MethodCall(log.signature(), println))));
+                List.of(new MethodCall(log.signature(), println, Invocation.VIRTUAL, "java/io/PrintStream"))));
 
         assertThat(count("""
                 MATCH (:Class {fqcn: 'com/acme/Service'})-[r:IMPLEMENTS]->(:Class {fqcn: 'java/io/Serializable'})
@@ -285,16 +287,8 @@ class Neo4jGraphRepositoryIT {
                 """, Map.of("signature", pay.signature())))
                 .isEqualTo(1);
 
-        // Resolution query documented in ADR-0006
-        try (Session session = driver.session()) {
-            List<String> resolved = session.run("""
-                            MATCH (:Method {signature: $caller})-[:CALLS]->(:Method)<-[:OVERRIDES*0..]-(impl:Method)
-                            WHERE NOT impl.isAbstract
-                            RETURN impl.signature AS impl
-                            """, Map.of("caller", checkoutMethod.signature()))
-                    .list(r -> r.get("impl").asString());
-            assertThat(resolved).containsExactlyInAnyOrder(cardPay.signature(), baseRefund.signature());
-        }
+        assertThat(resolveCallsFrom(checkoutMethod.signature()))
+                .containsExactlyInAnyOrder(cardPay.signature(), baseRefund.signature());
     }
 
     @Test
@@ -306,7 +300,7 @@ class Neo4jGraphRepositoryIT {
         }
 
         // Same pipeline as AppAnalyzer: parse -> resolve -> persist
-        repository.save(new OverrideResolver().resolve(parsed));
+        repository.save(new ModelResolver().resolve(parsed));
 
         String checkout = internalName(HierarchyFixture.Checkout.class);
         String card = internalName(HierarchyFixture.CardPaymentService.class);
@@ -319,15 +313,8 @@ class Neo4jGraphRepositoryIT {
                 .isEqualTo(1);
 
         // Checkout calls PaymentService#pay (interface): the code that runs is CardPaymentService#pay
-        try (Session session = driver.session()) {
-            List<String> resolved = session.run("""
-                            MATCH (:Method {signature: $caller})-[:CALLS]->(:Method)<-[:OVERRIDES*0..]-(impl:Method)
-                            WHERE NOT impl.isAbstract
-                            RETURN impl.signature AS impl
-                            """, Map.of("caller", checkout + "#checkout(Ljava/lang/String;)V"))
-                    .list(r -> r.get("impl").asString());
-            assertThat(resolved).containsExactly(card + "#pay(Ljava/lang/String;)V");
-        }
+        assertThat(resolveCallsFrom(checkout + "#checkout(Ljava/lang/String;)V"))
+                .containsExactly(card + "#pay(Ljava/lang/String;)V");
     }
 
     @Test
@@ -338,7 +325,7 @@ class Neo4jGraphRepositoryIT {
             parsed = new JarReader(jarFile).readAndBuildModel();
         }
 
-        repository.save(new OverrideResolver().resolve(parsed));
+        repository.save(new ModelResolver().resolve(parsed));
 
         // Bridges stay in the graph, flagged, and never own an OVERRIDES relationship (ADR-0007)
         assertThat(count("MATCH (m:Method) WHERE m.isBridge RETURN count(m)")).isEqualTo(4);
@@ -348,15 +335,51 @@ class Neo4jGraphRepositoryIT {
         String controller = internalName(BridgeFixture.OrderController.class);
         String orderRepository = internalName(BridgeFixture.OrderRepository.class);
         String order = "L" + internalName(BridgeFixture.Order.class) + ";";
-        try (Session session = driver.session()) {
-            List<String> resolved = session.run("""
-                            MATCH (:Method {signature: $caller})-[:CALLS]->(:Method)<-[:OVERRIDES*0..]-(impl:Method)
-                            WHERE NOT impl.isAbstract
-                            RETURN impl.signature AS impl
-                            """, Map.of("caller", controller + "#submit(" + order + ")V"))
-                    .list(r -> r.get("impl").asString());
-            assertThat(resolved).containsExactly(orderRepository + "#save(" + order + ")V");
+        assertThat(resolveCallsFrom(controller + "#submit(" + order + ")V"))
+                .containsExactly(orderRepository + "#save(" + order + ")V");
+    }
+
+    @Test
+    void shouldResolveInheritedAndNonDispatchingCalls(@TempDir Path tempDir) throws IOException {
+        Path jarPath = TestJars.createJar(tempDir.resolve("calls.jar"), CallFixture.CLASSES);
+        AnalysisResult parsed;
+        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
+            parsed = new JarReader(jarFile).readAndBuildModel();
         }
+
+        repository.save(new ModelResolver().resolve(parsed));
+
+        String api = internalName(CallFixture.PaymentService.class);
+        String base = internalName(CallFixture.AbstractPaymentService.class);
+        String card = internalName(CallFixture.CardPaymentService.class);
+        String paypal = internalName(CallFixture.PaypalPaymentService.class);
+        String id = "(Ljava/lang/String;)V";
+
+        // Calls carry how they are invoked and the type named in bytecode (ADR-0008)
+        assertThat(count("""
+                MATCH (:Method {signature: $caller})-[c:CALLS {invocation: 'SPECIAL', receiver: $base}]->
+                      (:Method {signature: $target})
+                RETURN count(c)
+                """, Map.of("caller", paypal + "#refund" + id, "base", base, "target", base + "#refund" + id)))
+                .isEqualTo(1);
+        // No phantom node for a method that its owner, part of the analysis, does not declare
+        assertThat(count("MATCH (m:Method {signature: $phantom}) RETURN count(m)",
+                Map.of("phantom", card + "#refund" + id)))
+                .isZero();
+
+        // super.refund(): no dispatch, so PaypalPaymentService.refund does not appear to call itself
+        assertThat(resolveCallsFrom(paypal + "#refund" + id)).containsExactly(base + "#refund" + id);
+
+        // checkout(): card.refund() resolved upward also returns PaypalPaymentService.refund, a sibling override.
+        // Accepted superset (ADR-0008): the right answer is always included
+        String checkout = internalName(CallFixture.Checkout.class) + "#checkout(L" + card + ";L" + base + ";L" + api
+                + ";Ljava/lang/String;)V";
+        assertThat(resolveCallsFrom(checkout)).containsExactlyInAnyOrder(
+                base + "#refund" + id,
+                paypal + "#refund" + id,
+                card + "#pay" + id,
+                paypal + "#pay" + id,
+                base + "#currency()Ljava/lang/String;");
     }
 
     // --- Fixtures ---
@@ -394,7 +417,7 @@ class Neo4jGraphRepositoryIT {
     }
 
     private static MethodCall call(JavaMethod caller, JavaMethod target) {
-        return new MethodCall(caller.signature(), target.signature());
+        return new MethodCall(caller.signature(), target.signature(), Invocation.VIRTUAL, target.ownerClassFqcn());
     }
 
     private static MethodOverride override(JavaMethod overriding, JavaMethod overridden) {
@@ -422,6 +445,22 @@ class Neo4jGraphRepositoryIT {
         return new GraphSize(
                 count("MATCH (n) RETURN count(n)"),
                 count("MATCH ()-[r]->() RETURN count(r)"));
+    }
+
+    /**
+     * Call resolution query documented in ADR-0008: the code that may run for every call made by {@code caller}.
+     */
+    private List<String> resolveCallsFrom(String caller) {
+        try (Session session = driver.session()) {
+            return session.run("""
+                            MATCH (:Method {signature: $caller})-[call:CALLS]->(declared:Method)
+                                  <-[:OVERRIDES*0..]-(impl:Method)
+                            WHERE NOT impl.isAbstract
+                              AND (impl = declared OR call.invocation IN ['VIRTUAL', 'INTERFACE'])
+                            RETURN DISTINCT impl.signature AS impl
+                            """, Map.of("caller", caller))
+                    .list(r -> r.get("impl").asString());
+        }
     }
 
     private long count(String cypher) {

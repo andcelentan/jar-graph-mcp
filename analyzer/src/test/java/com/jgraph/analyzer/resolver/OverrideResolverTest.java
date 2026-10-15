@@ -2,6 +2,7 @@ package com.jgraph.analyzer.resolver;
 
 import com.jgraph.analyzer.model.AnalysisResult;
 import com.jgraph.analyzer.model.ClassKind;
+import com.jgraph.analyzer.model.Invocation;
 import com.jgraph.analyzer.model.JavaClass;
 import com.jgraph.analyzer.model.JavaMethod;
 import com.jgraph.analyzer.model.MethodCall;
@@ -283,7 +284,7 @@ class OverrideResolverTest {
         AnalysisResult parsed = new AnalysisResult(
                 List.of(api, impl),
                 List.of(apiRun, implRun),
-                List.of(new MethodCall(implRun.signature(), apiRun.signature())));
+                List.of(new MethodCall(implRun.signature(), apiRun.signature(), Invocation.INTERFACE, api.fqcn())));
 
         AnalysisResult resolved = resolver.resolve(parsed);
 
@@ -485,7 +486,7 @@ class OverrideResolverTest {
     }
 
     private static MethodCall call(JavaMethod caller, JavaMethod target) {
-        return new MethodCall(caller.signature(), target.signature());
+        return new MethodCall(caller.signature(), target.signature(), Invocation.VIRTUAL, target.ownerClassFqcn());
     }
 
     private static MethodOverride override(JavaMethod overriding, JavaMethod overridden) {

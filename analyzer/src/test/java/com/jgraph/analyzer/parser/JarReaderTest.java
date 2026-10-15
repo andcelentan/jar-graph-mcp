@@ -2,8 +2,10 @@ package com.jgraph.analyzer.parser;
 
 import com.jgraph.analyzer.model.AnalysisResult;
 import com.jgraph.analyzer.model.ClassKind;
+import com.jgraph.analyzer.model.Invocation;
 import com.jgraph.analyzer.model.JavaClass;
 import com.jgraph.analyzer.model.JavaMethod;
+import com.jgraph.analyzer.model.MethodCall;
 import com.jgraph.analyzer.model.Visibility;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -176,6 +178,32 @@ class JarReaderTest {
         assertThat(methodOf(result, BridgeFixture.PublicFacade.class, "greet", "()V").isBridge()).isTrue();
 
         assertThat(result.methods()).filteredOn(JavaMethod::isBridge).hasSize(4);
+    }
+
+    @Test
+    void shouldRecordInvocationAndReceiverAsWrittenInBytecode() throws IOException {
+        Path jarPath = TestJars.createJar(tempDir.resolve("calls.jar"), CallFixture.CLASSES);
+
+        AnalysisResult result;
+        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
+            result = new JarReader(jarFile).readAndBuildModel();
+        }
+
+        String api = internalName(CallFixture.PaymentService.class);
+        String base = internalName(CallFixture.AbstractPaymentService.class);
+        String card = internalName(CallFixture.CardPaymentService.class);
+        String paypal = internalName(CallFixture.PaypalPaymentService.class);
+        String checkout = internalName(CallFixture.Checkout.class) + "#checkout(L" + card + ";L" + base + ";L" + api
+                + ";Ljava/lang/String;)V";
+        String id = "(Ljava/lang/String;)V";
+
+        // Parsed, not yet resolved: targets name the receiver's static type, even when it does not declare the method
+        assertThat(result.calls()).contains(
+                new MethodCall(checkout, card + "#refund" + id, Invocation.VIRTUAL, card),
+                new MethodCall(checkout, base + "#pay" + id, Invocation.VIRTUAL, base),
+                new MethodCall(checkout, api + "#pay" + id, Invocation.INTERFACE, api),
+                new MethodCall(checkout, card + "#currency()Ljava/lang/String;", Invocation.STATIC, card),
+                new MethodCall(paypal + "#refund" + id, base + "#refund" + id, Invocation.SPECIAL, base));
     }
 
     private static JavaMethod methodOf(AnalysisResult result, Class<?> owner, String name, String descriptor) {

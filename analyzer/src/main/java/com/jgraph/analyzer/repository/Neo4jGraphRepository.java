@@ -130,12 +130,14 @@ public class Neo4jGraphRepository implements GraphRepository {
                 ))
                 .toList();
 
-        // 6. Prepare [:CALLS] relationships batch (one row per distinct caller/target pair, not per call site)
+        // 6. Prepare [:CALLS] relationships batch (one row per distinct call, not per call site)
         List<Map<String, Object>> callBatch = result.calls().stream()
                 .distinct()
                 .map(call -> Map.<String, Object>of(
                         "callerSignature", call.callerSignature(),
-                        "targetSignature", call.targetSignature()
+                        "targetSignature", call.targetSignature(),
+                        "invocation", call.invocation().name(),
+                        "receiver", call.receiverFqcn()
                 ))
                 .toList();
 
@@ -192,12 +194,13 @@ public class Neo4jGraphRepository implements GraphRepository {
                         MERGE (overriding)-[:OVERRIDES]->(overridden)
                     """, overrideBatch);
 
-            // Step 6: Ingest [:CALLS] relationships (creates method stub if external/JDK)
+            // Step 6: Ingest [:CALLS] relationships (creates method stub if external/JDK or unresolved).
+            // The same caller/target pair may appear with different invocations or receivers (ADR-0008)
             writeInChunks(session, """
                         UNWIND $batch AS row
                         MATCH (caller:Method {signature: row.callerSignature})
                         MERGE (target:Method {signature: row.targetSignature})
-                        MERGE (caller)-[:CALLS]->(target)
+                        MERGE (caller)-[:CALLS {invocation: row.invocation, receiver: row.receiver}]->(target)
                     """, callBatch);
         }
     }
