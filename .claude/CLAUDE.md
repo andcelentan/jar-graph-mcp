@@ -34,31 +34,39 @@ DB config: `analyzer/src/main/resources/application.properties`, overridden by e
 
 ## Analyzer architecture
 
-`AppAnalyzer` (CLI) → `JarReader` → `OverrideResolver` → `GraphRepository.initSchema()` / `deleteAll()` / `save()`,
-passing an `AnalysisResult` along (extract → transform → load).
+`AppAnalyzer` (CLI) → `JarReader` → `ModelResolver` (`CallResolver` → `OverrideResolver`) →
+`GraphRepository.initSchema()` / `deleteAll()` / `save()`, passing an `AnalysisResult` along (extract → transform →
+load). `ModelResolver` is the only public class of the `resolver` package and fixes the order of its steps.
 
 - `JarReader` feeds every top-level `.class` entry to **one shared** `ModelBuildingClassVisitor`, which appends to plain
   lists. Per method it creates a `ModelBuildingMethodVisitor` that emits a `MethodCall` per `visitMethodInsn` and the
   `JavaMethod` itself in `visitEnd`. The whole model is held in memory before persistence.
 - **Cross-file invariant:** the method signature string is built in two places, `JavaMethod.signature()` and
   `ModelBuildingMethodVisitor` (caller and call-target signatures). Both must stay `owner#name + descriptor`, or
-  `CALLS` stop matching declared methods; `OverrideResolver` also looks methods up by that format.
-- The parser only records facts written in each `.class` (local); `OverrideResolver` derives facts that need the whole
-  hierarchy (ADR-0006). It is stateless: per call it builds an adjacency list (type → superclass + interfaces), a
-  signature index and a bridge index (bridge → the single same-name method its body calls, ADR-0007), then walks up
-  depth-first per method, stopping at the nearest valid declaration on each path. An override found for a bridge is
-  attributed to its bridged method, and dropped if that would be a self-override (visibility bridges).
-  Overrides are not in bytecode (`@Override` has SOURCE retention), so they can only be derived.
+  `CALLS` stop matching declared methods; the resolvers build and split it with the helpers of `TypeHierarchy`.
+- The parser only records facts written in each `.class` (local), including each call's `Invocation` (opcode) and
+  receiver (owner named in the instruction). The resolvers derive facts that need the whole hierarchy and are
+  stateless: per call they build a `TypeHierarchy` (package-private: types, adjacency list type → superclass +
+  interfaces, signature index; only types included in the analysis).
+  - `CallResolver` (ADR-0008) points each call whose named type is in the analysis but does not declare the method at
+    the declaration the JVM would resolve: superclass chain first; then superinterfaces (nearest declaration per path)
+    only if the chain ended at an implicit supertype. It leaves the call as written if the chain reaches an explicit
+    external superclass, or if zero or several declarations are found. `receiver` and `invocation` never change.
+  - `OverrideResolver` (ADR-0006, ADR-0007) builds a bridge index (bridge → the single same-name method its body calls,
+    from the already resolved calls), then walks up depth-first per method, stopping at the nearest valid declaration
+    on each path. An override found for a bridge is attributed to its bridged method, and dropped if that would be a
+    self-override (visibility bridges). Overrides are not in bytecode (`@Override` has SOURCE retention).
 - `GraphRepository` is the persistence port (no Neo4j types, to keep a Neptune adapter possible);
   `Neo4jGraphRepository` is the only adapter. `save()` writes in client-side chunks, one `executeWrite` per chunk,
   in dependency order: classes → `EXTENDS` → `IMPLEMENTS` → methods (+ `DECLARES`) → `OVERRIDES` → `CALLS`. Later
   steps `MATCH` nodes created by earlier ones. The `Driver` constructor is for tests/shared drivers, but `close()` still
   closes that driver.
-- Tests: `OverrideResolverTest` is the resolver's specification (hand-built hierarchies + real javac bytecode).
-  `Neo4jGraphRepositoryIT` runs against `neo4j:5.26-community` via Testcontainers (no driver mocks) and uses the
-  package-private `(Driver, chunkSize)` constructor with tiny chunks to cover chunk boundaries. `TestJars` builds JARs
-  from compiled test classes (`JarReaderTestFixture`, `HierarchyFixture`, `TypeKindFixture`, `BridgeFixture`); keep
-  fixtures free of generics and covariant returns unless the test is about bridge methods (`BridgeFixture`).
+- Tests: `CallResolverTest` and `OverrideResolverTest` are the resolvers' specifications (hand-built hierarchies + real
+  javac bytecode). `Neo4jGraphRepositoryIT` runs against `neo4j:5.26-community` via Testcontainers (no driver mocks),
+  uses the package-private `(Driver, chunkSize)` constructor with tiny chunks to cover chunk boundaries, and checks
+  call resolution with `resolveCallsFrom`, the query of ADR-0008. `TestJars` builds JARs from compiled test classes
+  (`JarReaderTestFixture`, `HierarchyFixture`, `TypeKindFixture`, `BridgeFixture`, `CallFixture`); keep fixtures free
+  of generics and covariant returns unless the test is about bridge methods (`BridgeFixture`).
   Validate a new specification (red tests) against a throwaway reference implementation before handing it over.
 
 ### Graph model
@@ -68,7 +76,7 @@ passing an `AnalysisResult` along (extract → transform → load).
 (:Class)-[:IMPLEMENTS]->(:Class)                                            class -> interface only
 (:Class)-[:DECLARES]->(:Method {signature, name, descriptor, returnType, parameterTypes,
                                 visibility, isStatic, isAbstract, isBridge, isTransactional})
-(:Method)-[:CALLS]->(:Method)
+(:Method)-[:CALLS {invocation, receiver}]->(:Method)                       declared method that is called
 (:Method)-[:OVERRIDES]->(:Method)                                           nearest overridden declaration
 ```
 
@@ -77,8 +85,13 @@ passing an `AnalysisResult` along (extract → transform → load).
 - `kind`: `CLASS`, `INTERFACE`, `ENUM`, `RECORD`, `ANNOTATION` (`ClassKind`; `isInterface()` is derived from it).
   Implicit supertypes (`java/lang/Object`, `Record`, `Enum`, `annotation/Annotation`) are never linked (supernodes);
   `JavaClass.superClass` is null for interfaces and when the superclass is implicit.
-- `CALLS` targets the static receiver type from the bytecode (often an interface); resolve the code that runs with
-  `(caller)-[:CALLS]->(declared)<-[:OVERRIDES*0..]-(impl) WHERE NOT impl.isAbstract`.
+- `CALLS` targets the declared method (ADR-0008), like "Go to Declaration"; `receiver` keeps the type named in bytecode
+  and `invocation` the instruction. Resolve the code that may run with
+  `(caller)-[call:CALLS]->(declared)<-[:OVERRIDES*0..]-(impl) WHERE NOT impl.isAbstract AND (impl = declared OR
+  call.invocation IN ['VIRTUAL', 'INTERFACE']) RETURN DISTINCT ...`. Known superset: virtual calls resolved to a
+  superclass also return sibling overrides (deferred; `receiver` allows filtering them later).
+- A `Method` without `DECLARES` is outside the analysis, except calls left unresolved on purpose (methods inherited
+  from the JDK or a framework superclass, ambiguous `default` methods), which stay on a node named after the receiver.
 - `OVERRIDES` only links types included in the analysis (`result.classes()`), not the artifact layout.
 - Bridge methods are kept (`isBridge = true`, with their `CALLS` to the bridged method) but never own `OVERRIDES`
   (ADR-0007): the graph keeps every method in bytecode, flagged rather than hidden. Queries listing methods filter
@@ -108,10 +121,10 @@ persistence, graph model, configuration or test strategy.
 - `ClassFileSource` abstraction (separate PR): recurse into nested archives (Spring Boot fat jar, WAR, EAR), package
   include filter, skip `META-INF/versions/**`, first-wins on duplicate classes. Input is the CI build artifact
   (ADR-0002); multi-JAR inputs and `target/classes` dirs are out of scope unless a new ADR says otherwise.
-- Calls to inherited methods (next, ADR-0008): bytecode names the receiver's static type (JLS §13.1), so
-  `sub.inherited()` becomes `CALLS -> Sub#inherited`, a stub not linked to the declaring superclass method. Mirror JVM
-  method resolution (JVMS §5.4.3.3) in the resolver with a derived `(:Method)-[:RESOLVES_TO]->(:Method)`, keeping
-  `CALLS` as in bytecode. Higher impact than bridges (template method pattern, `this.helper()`).
+- MCP server (next): a first minimal version with a few tools ("implementations of a method", "who calls this
+  method"), wrapping the ADR-0008 resolution query so assistants never write Cypher.
+- Deferred by ADR-0008: restrict dispatch to the receiver's subtypes (sibling overrides) using `receiver`, likely inside
+  MCP tools; resolve methods inherited from implicit/external supertypes (e.g. `Enum#name()`).
 - Parser fidelity: `invokedynamic` (lambda/method-ref call chains), exact `@Transactional` descriptors + class-level
   annotation, consistent type naming.
 - Repository: mark stub nodes (`external = true`); driver ownership in `close()`.
