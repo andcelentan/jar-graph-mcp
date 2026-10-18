@@ -10,3 +10,9 @@ spring:
         version: 1.0.0
         type: SYNC               # tools are plain blocking methods (no Reactor types)
         stdio: true
+  # Same environment variables as the analyzer (ADR-0004); the defaults match docker-compose.yml for local use
+  neo4j:
+    uri: ${NEO4J_URI:bolt://localhost:7687}
+    authentication:
+      username: ${NEO4J_USERNAME:neo4j}
+      password: ${NEO4J_PASSWORD:password123}
