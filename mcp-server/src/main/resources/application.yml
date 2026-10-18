@@ -1,0 +1,12 @@
+# STDIO transport (ADR-0009): standard output carries only MCP JSON-RPC messages
+spring:
+  main:
+    web-application-type: none   # no embedded web server: requests come from stdin, not HTTP
+    banner-mode: off             # the Spring banner would be printed on stdout and break the protocol
+  ai:
+    mcp:
+      server:
+        name: jar-graph-mcp      # how the server introduces itself to the client during the handshake
+        version: 1.0.0
+        type: SYNC               # tools are plain blocking methods (no Reactor types)
+        stdio: true

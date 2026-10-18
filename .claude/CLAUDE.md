@@ -8,7 +8,7 @@ Bytecode analyzer (ASM) → Neo4j knowledge graph → MCP server that lets AI as
 (classes, methods, calls, hierarchies) deterministically instead of guessing it.
 
 - `analyzer`: JAR parsing + graph persistence (current focus).
-- `mcp-server`: IntelliJ placeholder `Main`, no MCP code yet.
+- `mcp-server`: Spring AI 2.0.1 / Spring Boot 4.1.1 MCP server over STDIO (ADR-0009); tools in progress.
 - Target: event-driven on AWS, provisioned with Terraform (S3 upload → EventBridge → ECS/Fargate analysis task;
   Neo4j Aura/self-managed or Neptune; MCP server as an ECS service; OAuth 2.1 for MCP clients, e.g. Cognito; IAM roles
   between AWS services). Local design choices should not block that path.
@@ -26,7 +26,16 @@ mvn -pl analyzer -am verify -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false 
 
 # Run the analyzer (compile first). It WIPES the target Neo4j database before writing.
 mvn -q -pl analyzer exec:java -Dexec.mainClass=com.jgraph.analyzer.AppAnalyzer -Dexec.args=path/to/app.jar
+
+# Build the MCP server (executable jar); an MCP client starts it with `java -jar` and talks over stdin/stdout
+mvn -pl mcp-server -am package
 ```
+
+`mcp-server` imports the Spring Boot and Spring AI BOMs in its own `dependencyManagement`, so they do not affect the
+analyzer. Effective versions differ between modules: JUnit 6 (from Spring Boot) in `mcp-server`, JUnit 5 in `analyzer`;
+the Neo4j driver version of the root `pom.xml` wins in both. With STDIO, stdout carries only JSON-RPC: no banner, no
+web server, logs on stderr (`logback-spring.xml`). Do not probe the server from PowerShell 5.1: it writes a UTF-8 BOM
+on stdin and the first message fails to parse; use a bash coprocess or the SDK client.
 
 Java 21, Maven multi-module; dependency versions and BOMs live in the root `pom.xml`. No linter/formatter configured.
 DB config: `analyzer/src/main/resources/application.properties`, overridden by env vars `NEO4J_URI`,
@@ -121,8 +130,21 @@ persistence, graph model, configuration or test strategy.
 - `ClassFileSource` abstraction (separate PR): recurse into nested archives (Spring Boot fat jar, WAR, EAR), package
   include filter, skip `META-INF/versions/**`, first-wins on duplicate classes. Input is the CI build artifact
   (ADR-0002); multi-JAR inputs and `target/classes` dirs are out of scope unless a new ADR says otherwise.
-- MCP server (next): a first minimal version with a few tools ("implementations of a method", "who calls this
-  method"), wrapping the ADR-0008 resolution query so assistants never write Cypher.
+- MCP server (in progress, branch `feature/mcp-server`, ADR-0009): a first minimal version with a few tools
+  ("implementations of a method", "who calls this method"), wrapping the ADR-0008 resolution query so assistants never
+  write Cypher. Requirement: **a tool never returns an empty answer without saying why.** When resolution finds no
+  concrete code, return the declared method flagged "abstract, no implementation in the analysis"; for interfaces
+  extending Spring Data repositories (detectable from their supertypes in the graph) add "implemented by Spring Data at
+  run time". Same gap for other runtime-generated implementations (Feign clients); MapStruct and Lombok are fine
+  (code generated at compile time, present in the JAR).
+- Dependency injection (from the review of `@Autowired` calls): DI itself needs nothing (an injected field is a plain
+  `INTERFACE` call; one implementation gives an exact answer, several give a superset).
+  - Framework entry points (own ADR, parser change): read Spring annotations with RUNTIME retention (`@GetMapping` and
+    other mappings, `@EventListener`, `@Scheduled`, `@KafkaListener`...) and flag those methods as invoked by the
+    framework, so that "no callers" is not mistaken for dead code. `publishEvent` → listeners is only linked at run
+    time.
+  - Later: narrow implementations with `@Qualifier`/`@Primary`; flag self-invocation of `@Transactional` methods
+    (`this.m()` bypasses the Spring proxy, so no transaction starts).
 - Deferred by ADR-0008: restrict dispatch to the receiver's subtypes (sibling overrides) using `receiver`, likely inside
   MCP tools; resolve methods inherited from implicit/external supertypes (e.g. `Enum#name()`).
 - Parser fidelity: `invokedynamic` (lambda/method-ref call chains), exact `@Transactional` descriptors + class-level
