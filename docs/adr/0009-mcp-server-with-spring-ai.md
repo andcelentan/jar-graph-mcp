@@ -22,8 +22,9 @@ Questions to settle:
 - **Transport.** STDIO: the client starts the server as a process and talks over stdin/stdout; ideal locally, no
   network, no authentication. Streamable HTTP (`spring-ai-starter-mcp-server-webmvc`, `protocol=STREAMABLE`): needed
   for a shared server on AWS (ADR roadmap), but its endpoint is unauthenticated by default.
-- **How an assistant names a method.** It reasons with source names (`com.acme.OrderService`, `save(Order)`), not
-  bytecode names (`com/acme/OrderService#save(Lcom/acme/Order;)V`), and may not know which overload it means.
+- **How an assistant names a method.** It reasons with source names (`OrderService`, `save(Order)`), not bytecode
+  names (`com/acme/OrderService#save(Lcom/acme/Order;)V`). It may not know the package of a class, since it does not
+  always have the whole code base in context, nor which overload it means.
 - **What an empty result means.** Some calls have no implementation in the analysis (Spring Data repositories, Feign
   clients are generated at run time; abstract methods with no implementation): an empty answer would make the
   assistant guess, the failure this project exists to prevent.
@@ -64,9 +65,12 @@ Questions to settle:
 6. **The graph model as an MCP resource**, `graph://model`: nodes, relationships, properties and the rules a correct
    query must follow (dispatch filter, bridges, stub nodes). It is what lets an assistant write correct Cypher for
    `query_graph`. It is a Markdown file in the module, served as is: a change to the graph model must update it.
-7. **Source-style input.** Tools take a class name as written in Java (`com.acme.OrderService`, nested classes with `.`
-   or `$`), a method name and optional parameter types. If the parameter types are omitted and the name is overloaded,
-   the tool returns the candidate signatures and asks to choose, instead of picking one.
+7. **Source-style input, lenient matching.** Tools take a class name as the assistant knows it: simple
+   (`OrderService`), partially or fully qualified (`com.acme.OrderService`), nested classes with `.` or `$`, matched on
+   whole name segments (`PaymentService` never matches `CardPaymentService`); and a method name. Every matching class
+   and every overload is returned, each with its class and parameter types, so the assistant chooses instead of the
+   tool guessing or refusing. Tools give context, not proof: a partial answer is better than a refusal, never at the
+   cost of a wrong one. One query per tool call.
 8. **Never an empty answer without a reason.** Results are structured objects with an explicit `note` when there is
    nothing to show: unknown class or method, "abstract, no implementation in the analysis", or "implemented at run time
    by Spring Data" for interfaces extending Spring Data repository types (recognizable from their supertypes in the
