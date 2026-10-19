@@ -11,36 +11,49 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 
 /**
- * Read-only queries over the code graph written by the analyzer (ADR-0009). Every query runs in a read transaction.
- * Inputs and outputs use graph identifiers (JVM internal names, signatures): converting the names an assistant uses
- * is the job of the tools.
+ * Read-only queries over the code graph written by the analyzer (ADR-0009). Every query runs in a read transaction
+ * and returns facts in graph identifiers (JVM internal names, signatures): the words for the assistant are the job of
+ * the tools.
+ * <p>
+ * Classes are looked up by name as an assistant knows it: {@code className} is dotted, nested classes included
+ * ({@code Outer.Inner}), and matches every class of the analysis whose name is it or ends with it on a segment
+ * boundary: {@code JarReader}, {@code parser.JarReader} and {@code com.acme.parser.JarReader} all find
+ * {@code com/acme/parser/JarReader}, while {@code Reader} does not.
  */
 @Component
 public class GraphQueries {
 
     /**
-     * The code that may run when the method is called: following {@code OVERRIDES} down from it, zero or more steps,
-     * keeping concrete methods only (ADR-0006, ADR-0008). Bridges never own {@code OVERRIDES}, so they can only appear
-     * as the method itself, and are filtered out (ADR-0007).
+     * For every class matching the name, its methods with the given name (all overloads, bridges excluded) and the
+     * code that may run when each is called: following {@code OVERRIDES} down from it, zero or more steps, keeping
+     * concrete methods only (ADR-0006, ADR-0008). A matching class that declares no such method still gives a row,
+     * with a null method, so the tool can tell "no such class" from "no such method".
      * <p>
-     * Spring Data types are stubs without supertypes of their own, so the path stops at the first one
-     * ({@code JpaRepository}, not {@code Repository}): repository types are recognized by package instead, and every
-     * one of them, store-specific or not, lives in a {@code repository} package.
+     * Only analyzed classes have a {@code kind} (stubs only have {@code fqcn}). Spring Data types are stubs without
+     * supertypes of their own, so the path stops at the first one ({@code JpaRepository}, not {@code Repository}):
+     * repository types are recognized by package, and all of them, store-specific or not, live in a {@code repository}
+     * package.
      */
     private static final String FIND_IMPLEMENTATIONS = """
-            MATCH (owner:Class)-[:DECLARES]->(method:Method {signature: $signature})
+            MATCH (owner:Class)
+            WHERE owner.kind IS NOT NULL
+            WITH owner, replace(replace(owner.fqcn, '/', '.'), '$', '.') AS dottedName
+            WHERE dottedName = $className OR dottedName ENDS WITH '.' + $className
+            OPTIONAL MATCH (owner)-[:DECLARES]->(method:Method {name: $methodName})
+            WHERE NOT method.isBridge
             OPTIONAL MATCH (method)<-[:OVERRIDES*0..]-(impl:Method)
             WHERE NOT impl.isAbstract AND NOT impl.isBridge
             WITH owner, method, collect(DISTINCT impl) AS implementations
-            RETURN method,
+            RETURN owner.fqcn AS fqcn,
+                   method,
                    implementations,
                    EXISTS {
                        (owner)-[:EXTENDS|IMPLEMENTS*1..]->(supertype:Class)
                        WHERE supertype.fqcn =~ 'org/springframework/data/(.+/)?repository/.+'
                    } AS springDataRepository
+            ORDER BY fqcn, method.signature
             """;
 
     private final Driver driver;
@@ -50,17 +63,26 @@ public class GraphQueries {
     }
 
     /**
-     * @param signature {@code owner#name(descriptor)}, e.g. {@code com/acme/OrderService#save(Lcom/acme/Order;)V}
-     * @return empty if no class of the analysis declares this method
+     * @param className  dotted class name, simple or qualified, e.g. {@code PaymentService} or {@code Outer.Inner}
+     * @param methodName e.g. {@code pay}
      */
-    public Optional<Implementations> findImplementations(String signature) {
+    public ImplementationSearch findImplementations(String className, String methodName) {
         try (Session session = driver.session()) {
-            return session.executeRead(tx -> tx.run(FIND_IMPLEMENTATIONS, Map.of("signature", signature))
-                    .list()
-                    .stream()
-                    .findFirst()
-                    .map(GraphQueries::toImplementations));
+            return session.executeRead(tx -> toSearch(
+                    tx.run(FIND_IMPLEMENTATIONS, Map.of("className", className, "methodName", methodName)).list()));
         }
+    }
+
+    private static ImplementationSearch toSearch(List<Record> rows) {
+        List<String> classes = rows.stream()
+                .map(row -> row.get("fqcn").asString())
+                .distinct()
+                .toList();
+        List<Implementations> methods = rows.stream()
+                .filter(row -> !row.get("method").isNull())
+                .map(GraphQueries::toImplementations)
+                .toList();
+        return new ImplementationSearch(classes, methods);
     }
 
     private static Implementations toImplementations(Record row) {

@@ -18,6 +18,7 @@ public class McpFixture {
             CardPaymentService.class,
             PaypalPaymentService.class,
             AuditLog.class,
+            Notifier.class,
             Order.class,
             OrderRepository.class,
             OrderAuditor.class,
@@ -57,6 +58,14 @@ public class McpFixture {
 
     public interface AuditLog {
         void record(String event);
+    }
+
+    // --- Overloads: a method name alone does not identify the method ---
+
+    public interface Notifier {
+        void send(String message);
+
+        void send(String message, List<String> recipients);
     }
 
     // --- Spring Data repository: implemented at run time, never in the jar ---

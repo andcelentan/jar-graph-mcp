@@ -1,91 +1,91 @@
 package com.jgraph.mcp.graph;
 
-import com.jgraph.analyzer.model.AnalysisResult;
-import com.jgraph.analyzer.parser.JarReader;
-import com.jgraph.analyzer.parser.TestJars;
-import com.jgraph.analyzer.repository.Neo4jGraphRepository;
-import com.jgraph.analyzer.resolver.ModelResolver;
+import com.jgraph.mcp.fixture.FixtureGraph;
 import com.jgraph.mcp.fixture.McpFixture;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import org.neo4j.driver.AuthTokens;
-import org.neo4j.driver.Driver;
-import org.neo4j.driver.GraphDatabase;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.neo4j.Neo4jContainer;
-
-import java.io.IOException;
-import java.nio.file.Path;
-import java.util.jar.JarFile;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * {@link GraphQueries} against a real Neo4j (ADR-0005), on a graph written by the analyzer pipeline itself
- * (parse → resolve → save), so the queries are tested on the same graph the server reads in production (ADR-0009).
+ * {@link GraphQueries} on the graph of {@link McpFixture}, written by the analyzer pipeline ({@link FixtureGraph}).
  */
-@Testcontainers
 class GraphQueriesIT {
 
     private static final String STRING_TO_VOID = "(Ljava/lang/String;)V";
 
-    @Container
-    private static final Neo4jContainer NEO4J = new Neo4jContainer("neo4j:5.26-community").withoutAuthentication();
-
-    @TempDir
-    private static Path tempDir;
-
-    private static Driver driver;
     private static GraphQueries queries;
 
     @BeforeAll
-    static void loadFixtureGraph() throws IOException {
-        driver = GraphDatabase.driver(NEO4J.getBoltUrl(), AuthTokens.none());
-
-        Path jarPath = TestJars.createJar(tempDir.resolve("fixture.jar"), McpFixture.CLASSES);
-        AnalysisResult parsed;
-        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
-            parsed = new JarReader(jarFile).readAndBuildModel();
-        }
-        // Not closed: close() would also close the shared driver
-        Neo4jGraphRepository repository = new Neo4jGraphRepository(driver);
-        repository.initSchema();
-        repository.deleteAll();
-        repository.save(new ModelResolver().resolve(parsed));
-
-        queries = new GraphQueries(driver);
+    static void connect() {
+        queries = new GraphQueries(FixtureGraph.driver());
     }
 
-    @AfterAll
-    static void closeDriver() {
-        if (driver != null) {
-            driver.close();
-        }
+    // --- Class names ---
+
+    @Test
+    void shouldFindClassesBySimpleOrQualifiedName() {
+        String expected = internalName(McpFixture.PaymentService.class);
+
+        assertThat(queries.findImplementations("PaymentService", "pay").classes()).containsExactly(expected);
+        assertThat(queries.findImplementations("McpFixture.PaymentService", "pay").classes())
+                .containsExactly(expected);
+        assertThat(queries.findImplementations("com.jgraph.mcp.fixture.McpFixture.PaymentService", "pay").classes())
+                .containsExactly(expected);
     }
 
     @Test
-    void shouldReturnEveryImplementationOfAnInterfaceMethod() {
-        Implementations result = queries.findImplementations(
-                signature(McpFixture.PaymentService.class, "pay" + STRING_TO_VOID)).orElseThrow();
+    void shouldMatchWholeNameSegmentsOnly() {
+        // CardPaymentService and AbstractPaymentService end with "PaymentService", but not with ".PaymentService"
+        assertThat(queries.findImplementations("PaymentService", "pay").classes()).hasSize(1);
+        assertThat(queries.findImplementations("Service", "pay").classes()).isEmpty();
+    }
 
-        assertThat(result.method().isAbstract()).isTrue();
-        assertThat(result.implementations())
+    @Test
+    void shouldIgnoreStubNodes() {
+        // Repository is referenced as a supertype but never analyzed
+        assertThat(queries.findImplementations("org.springframework.data.repository.Repository", "save").classes())
+                .isEmpty();
+    }
+
+    @Test
+    void shouldReportAMatchingClassThatDoesNotDeclareTheMethod() {
+        ImplementationSearch search = queries.findImplementations("CardPaymentService", "refund");
+
+        // refund is inherited from AbstractPaymentService
+        assertThat(search.classes()).containsExactly(internalName(McpFixture.CardPaymentService.class));
+        assertThat(search.methods()).isEmpty();
+    }
+
+    // --- Methods and implementations ---
+
+    @Test
+    void shouldReturnEveryImplementationOfAnInterfaceMethod() {
+        Implementations pay = single(queries.findImplementations("PaymentService", "pay"));
+
+        assertThat(pay.method().isAbstract()).isTrue();
+        assertThat(pay.implementations())
                 .extracting(MethodInfo::signature)
                 .containsExactly(
                         signature(McpFixture.CardPaymentService.class, "pay" + STRING_TO_VOID),
                         signature(McpFixture.PaypalPaymentService.class, "pay" + STRING_TO_VOID));
-        assertThat(result.springDataRepository()).isFalse();
+        assertThat(pay.springDataRepository()).isFalse();
+    }
+
+    @Test
+    void shouldReturnEveryOverload() {
+        assertThat(queries.findImplementations("Notifier", "send").methods())
+                .extracting(found -> found.method().signature())
+                .containsExactly(
+                        signature(McpFixture.Notifier.class, "send" + STRING_TO_VOID),
+                        signature(McpFixture.Notifier.class, "send(Ljava/lang/String;Ljava/util/List;)V"));
     }
 
     @Test
     void shouldIncludeTheMethodItselfWhenItHasABody() {
-        Implementations result = queries.findImplementations(
-                signature(McpFixture.AbstractPaymentService.class, "refund" + STRING_TO_VOID)).orElseThrow();
+        Implementations refund = single(queries.findImplementations("AbstractPaymentService", "refund"));
 
-        assertThat(result.implementations())
+        assertThat(refund.implementations())
                 .extracting(MethodInfo::signature)
                 .containsExactly(
                         signature(McpFixture.AbstractPaymentService.class, "refund" + STRING_TO_VOID),
@@ -94,57 +94,48 @@ class GraphQueriesIT {
 
     @Test
     void shouldReturnNoImplementationForAnAbstractMethodWithoutOverrides() {
-        Implementations result = queries.findImplementations(
-                signature(McpFixture.AuditLog.class, "record" + STRING_TO_VOID)).orElseThrow();
+        Implementations record = single(queries.findImplementations("AuditLog", "record"));
 
-        assertThat(result.method().isAbstract()).isTrue();
-        assertThat(result.implementations()).isEmpty();
-        assertThat(result.springDataRepository()).isFalse();
+        assertThat(record.method().isAbstract()).isTrue();
+        assertThat(record.implementations()).isEmpty();
+        assertThat(record.springDataRepository()).isFalse();
     }
 
     @Test
     void shouldFlagSpringDataRepositories() {
-        Implementations result = queries.findImplementations(
-                signature(McpFixture.OrderRepository.class, "findByCustomerId(Ljava/lang/String;)Ljava/util/List;"))
-                .orElseThrow();
+        Implementations finder = single(queries.findImplementations("OrderRepository", "findByCustomerId"));
 
         // No implementation in the jar: Spring Data generates it at run time
-        assertThat(result.implementations()).isEmpty();
-        assertThat(result.springDataRepository()).isTrue();
+        assertThat(finder.implementations()).isEmpty();
+        assertThat(finder.springDataRepository()).isTrue();
     }
 
     @Test
     void shouldNotFlagSpringDataTypesThatAreNotRepositories() {
-        Implementations result = queries.findImplementations(
-                signature(McpFixture.OrderAuditor.class, "currentTenant()Ljava/lang/String;")).orElseThrow();
+        Implementations tenant = single(queries.findImplementations("OrderAuditor", "currentTenant"));
 
         // Spring Data generates implementations for repositories only: this method is simply unimplemented
-        assertThat(result.implementations()).isEmpty();
-        assertThat(result.springDataRepository()).isFalse();
+        assertThat(tenant.implementations()).isEmpty();
+        assertThat(tenant.springDataRepository()).isFalse();
     }
 
     @Test
     void shouldNeverListBridgeMethods() {
-        Implementations result = queries.findImplementations(
-                signature(McpFixture.Store.class, "save(Ljava/lang/Object;)V")).orElseThrow();
+        String saveOrder = signature(McpFixture.OrderStore.class,
+                "save(L" + internalName(McpFixture.Order.class) + ";)V");
 
-        // OrderStore also declares a bridge save(Object): only the method the developer wrote is listed
-        assertThat(result.implementations())
+        // OrderStore also declares a bridge save(Object): neither the method asked about nor an implementation
+        assertThat(queries.findImplementations("OrderStore", "save").methods())
+                .extracting(found -> found.method().signature())
+                .containsExactly(saveOrder);
+        assertThat(single(queries.findImplementations("Store", "save")).implementations())
                 .extracting(MethodInfo::signature)
-                .containsExactly(signature(McpFixture.OrderStore.class,
-                        "save(L" + internalName(McpFixture.Order.class) + ";)V"));
-    }
-
-    @Test
-    void shouldReturnNothingForMethodsOutsideTheAnalysis() {
-        assertThat(queries.findImplementations("java/util/List#add(Ljava/lang/Object;)Z")).isEmpty();
-        assertThat(queries.findImplementations(signature(McpFixture.PaymentService.class, "missing()V"))).isEmpty();
+                .containsExactly(saveOrder);
     }
 
     @Test
     void shouldMapMethodDetailsInSourceTypes() {
-        MethodInfo pay = queries.findImplementations(
-                signature(McpFixture.CardPaymentService.class, "pay" + STRING_TO_VOID)).orElseThrow().method();
+        MethodInfo pay = single(queries.findImplementations("CardPaymentService", "pay")).method();
 
         assertThat(pay.ownerFqcn()).isEqualTo(internalName(McpFixture.CardPaymentService.class));
         assertThat(pay.name()).isEqualTo("pay");
@@ -152,6 +143,11 @@ class GraphQueriesIT {
         assertThat(pay.parameterTypes()).containsExactly("java.lang.String");
         assertThat(pay.visibility()).isEqualTo("PUBLIC");
         assertThat(pay.isStatic()).isFalse();
+    }
+
+    private static Implementations single(ImplementationSearch search) {
+        assertThat(search.methods()).hasSize(1);
+        return search.methods().getFirst();
     }
 
     private static String signature(Class<?> owner, String nameAndDescriptor) {

@@ -8,7 +8,8 @@ Bytecode analyzer (ASM) → Neo4j knowledge graph → MCP server that lets AI as
 (classes, methods, calls, hierarchies) deterministically instead of guessing it.
 
 - `analyzer`: JAR parsing + graph persistence (current focus).
-- `mcp-server`: Spring AI 2.0.1 / Spring Boot 4.1.1 MCP server over STDIO (ADR-0009); tools in progress.
+- `mcp-server`: Spring AI 2.0.1 / Spring Boot 4.1.1 MCP server over STDIO (ADR-0009): `find_implementations`, more
+  tools in progress.
 - Target: event-driven on AWS, provisioned with Terraform (S3 upload → EventBridge → ECS/Fargate analysis task;
   Neo4j Aura/self-managed or Neptune; MCP server as an ECS service; OAuth 2.1 for MCP clients, e.g. Cognito; IAM roles
   between AWS services). Local design choices should not block that path.
@@ -29,6 +30,9 @@ mvn -q -pl analyzer exec:java -Dexec.mainClass=com.jgraph.analyzer.AppAnalyzer -
 
 # Build the MCP server (executable jar); an MCP client starts it with `java -jar` and talks over stdin/stdout
 mvn -pl mcp-server -am package
+mvn -pl mcp-server -am verify        # analyzer + server tests (server ITs need Docker)
+# Single server IT: with -am the analyzer has no matching IT, hence the failsafe flag
+mvn -pl mcp-server -am verify -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false -Dfailsafe.failIfNoSpecifiedTests=false -Dit.test=FindImplementationsToolIT
 ```
 
 `mcp-server` imports the Spring Boot and Spring AI BOMs in its own `dependencyManagement`, so they do not affect the
@@ -105,6 +109,31 @@ load). `ModelResolver` is the only public class of the `resolver` package and fi
 - Bridge methods are kept (`isBridge = true`, with their `CALLS` to the bridged method) but never own `OVERRIDES`
   (ADR-0007): the graph keeps every method in bytecode, flagged rather than hidden. Queries listing methods filter
   `WHERE NOT m.isBridge`. Calls that target a visibility bridge directly still resolve to the bridge (known limit).
+
+## MCP server architecture
+
+Tool (package `tool`, e.g. `FindImplementationsTool`) → `GraphQueries` (package `graph`) → the Neo4j `Driver`
+auto-configured by Spring Boot (`spring.neo4j.*` in `application.yml`, same env vars as the analyzer). One query per
+tool call.
+
+- Tools are `@Component` beans with `@McpTool` methods, registered by Spring AI's annotation scanner. Arguments are
+  bound and named in the schema after the Java parameters, so the module compiles with `-parameters`
+  (`maven.compiler.parameters`). Results are records that Spring AI serializes with its own Jackson 3 mapper as text
+  content (no output schema); `@JsonInclude` drops fields that do not apply. A `RuntimeException` becomes a result
+  with `isError: true` that the model reads: throw `IllegalArgumentException` for malformed input.
+- `GraphQueries` returns facts in graph identifiers (`MethodInfo`, internal names, signatures), always in
+  `executeRead`; tools write the words. Analyzed classes are the `Class` nodes with a `kind` (stubs only have `fqcn`).
+- Tools are context, not proof: partial answers beat refusals. Class names match like the assistant knows them:
+  simple, partially or fully qualified, nested as `Outer.Inner` or `Outer$Inner` (`SourceNames.dottedClassName`), on
+  whole name segments (`PaymentService` never matches `CardPaymentService`). Every matching class and every overload
+  is returned, each with its class and parameter types, and the assistant picks. Output uses binary names
+  (`com.acme.Outer$Inner`).
+- An empty answer always has a `note` saying why (ADR-0009): no such class, class found but method not declared
+  there, abstract with no implementation, Spring Data repository.
+- Tests: `FixtureGraph` writes the graph of `McpFixture` with the real analyzer pipeline (analyzer `test-jar`) to one
+  Neo4j container shared by the whole test JVM (singleton container). Spring Data types are stand-ins under
+  `src/test/java/org/springframework/data/`, never packaged in the fixture jar. Tools are tested by calling their
+  methods. Failsafe reads `classesDirectory` because `repackage` replaces the module jar.
 
 ## Working agreement
 
