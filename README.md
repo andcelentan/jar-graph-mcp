@@ -26,8 +26,8 @@ reflects the latest build of the application, internal dependencies included.
 flowchart LR
     JAR[".jar"] --> A["analyzer<br/>bytecode parsing (ASM)<br/>+ override resolution"]
     A --> N[("Neo4j<br/>knowledge graph")]
-    N -.-> M["mcp-server<br/>(planned)"]
-    M -.-> AI["AI assistant / IDE"]
+    N --> M["mcp-server<br/>MCP tools over STDIO"]
+    M --> AI["AI assistant / IDE"]
 ```
 
 1. **Analyzer**: reads the `.class` files of a JAR with [ASM](https://asm.ow2.io/) and extracts classes, interfaces,
@@ -35,9 +35,10 @@ flowchart LR
    It then works out which methods override which, so that a call to an interface can be followed to the code that
    actually runs.
 2. **Knowledge graph**: the model is persisted to Neo4j as nodes and relationships, queryable with Cypher.
-3. **MCP server** _(planned)_: exposes graph traversals to AI assistants through the
+3. **MCP server**: exposes the graph to AI assistants as tools of the
    [Model Context Protocol](https://modelcontextprotocol.io/), so the IDE can fetch the exact context of the code
-   being changed.
+   being changed. Built with Spring AI, it reads the graph only, and its answers are facts from bytecode: an empty
+   answer always says why ([ADR-0009](docs/adr/0009-mcp-server-with-spring-ai.md)).
 
 ## Status
 
@@ -48,7 +49,8 @@ flowchart LR
 | Inheritance and override resolution (abstract classes, interface hierarchies) | ✅ Done |
 | Bridge methods (generics, covariant return types) | ✅ Done |
 | Call resolution (inherited methods, `super` and static calls) | ✅ Done |
-| MCP server (first tools) | 🚧 Next |
+| MCP server: `find_implementations`, `describe_class` (STDIO) | ✅ Done |
+| MCP server: `find_callers`, read-only Cypher, graph model resource | 🚧 Next |
 | Nested archives (Spring Boot fat jar, WAR, EAR) | 📋 Planned |
 | Parser fidelity (lambdas / method references) | 📋 Planned |
 | AWS deployment | 📋 Planned |
@@ -74,6 +76,43 @@ mvn -q -pl analyzer exec:java \
 
 Connection settings come from `analyzer/src/main/resources/application.properties` and can be overridden with the
 `NEO4J_URI`, `NEO4J_USERNAME` and `NEO4J_PASSWORD` environment variables.
+
+### Use it from an AI assistant
+
+```bash
+# 4. Build the MCP server: an executable jar that MCP clients start and talk to over stdin/stdout
+mvn -pl mcp-server -am package
+```
+
+Register it in an MCP client, e.g. in the `.mcp.json` of a project for Claude Code (Claude Desktop uses the same
+`mcpServers` format), with an absolute path to the jar:
+
+```json
+{
+  "mcpServers": {
+    "jar-graph": {
+      "command": "java",
+      "args": ["-jar", "/absolute/path/to/mcp-server/target/mcp-server-1.0.0-SNAPSHOT.jar"],
+      "env": {
+        "NEO4J_URI": "bolt://localhost:7687",
+        "NEO4J_USERNAME": "neo4j",
+        "NEO4J_PASSWORD": "password123"
+      }
+    }
+  }
+}
+```
+
+The assistant can then answer questions like *"what runs when `PaymentService.pay` is called?"* or *"what does
+`JarReader` contain?"* from the graph instead of guessing:
+
+| Tool | Answers |
+|------|---------|
+| `find_implementations` | The concrete methods that may run when a method is called: the method itself if it has a body, plus every override. Notes abstract methods with no implementation and Spring Data repositories, implemented at run time. |
+| `describe_class` | A class's kind, direct supertypes (flagged when outside the analysis) and subtypes, and declared methods, lambda bodies flagged. |
+
+Class names can be simple (`JarReader`) or qualified (`com.jgraph.analyzer.parser.JarReader`): every matching class
+and every overload is returned, and the assistant picks.
 
 ### Example queries
 
@@ -168,8 +207,9 @@ Significant design decisions, with their context and trade-offs, are recorded as
 ## Tests
 
 ```bash
-mvn -pl analyzer -am test     # unit tests
-mvn -pl analyzer -am verify   # + integration tests against a real Neo4j (Testcontainers, requires Docker)
+mvn -pl analyzer -am test       # unit tests
+mvn -pl analyzer -am verify     # + integration tests against a real Neo4j (Testcontainers, requires Docker)
+mvn -pl mcp-server -am verify   # + MCP tools, on a graph written by the analyzer itself
 ```
 
 ## Roadmap & cloud vision

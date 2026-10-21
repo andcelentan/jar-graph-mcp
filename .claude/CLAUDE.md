@@ -168,13 +168,17 @@ persistence, graph model, configuration or test strategy.
 - `ClassFileSource` abstraction (separate PR): recurse into nested archives (Spring Boot fat jar, WAR, EAR), package
   include filter, skip `META-INF/versions/**`, first-wins on duplicate classes. Input is the CI build artifact
   (ADR-0002); multi-JAR inputs and `target/classes` dirs are out of scope unless a new ADR says otherwise.
-- MCP server (in progress, branch `feature/mcp-server`, ADR-0009): a first minimal version with a few tools
-  ("implementations of a method", "who calls this method"), wrapping the ADR-0008 resolution query so assistants never
-  write Cypher. Requirement: **a tool never returns an empty answer without saying why.** When resolution finds no
-  concrete code, return the declared method flagged "abstract, no implementation in the analysis"; for interfaces
-  extending Spring Data repositories (detectable from their supertypes in the graph) add "implemented by Spring Data at
-  run time". Same gap for other runtime-generated implementations (Feign clients); MapStruct and Lombok are fine
-  (code generated at compile time, present in the JAR).
+- MCP server (ADR-0009): `find_implementations` and `describe_class` done (first PR). Next, one branch and PR each:
+  - `find_callers`: the ADR-0008 resolution query read backwards (direct callers, plus `VIRTUAL`/`INTERFACE` calls to
+    a declaration the method overrides, shown with a `through` field); bridges never listed as callers; "no callers"
+    note saying it is not necessarily dead code (framework entry points, reflection, other jars); callers through
+    method references are missing (`invokedynamic`) and the description must say so. Receiver filtering (sibling
+    overrides) deferred: exact between classes only.
+  - `query_graph` (`EXPLAIN` check of the query type, read transaction, timeout, row limit), the `graph://model`
+    resource, the end-to-end STDIO test with the SDK client.
+  - Requirement for every tool: **never an empty answer without saying why.** Same gap as Spring Data for other
+    runtime-generated implementations (Feign clients); MapStruct and Lombok are fine (code generated at compile time,
+    present in the JAR).
 - Dependency injection (from the review of `@Autowired` calls): DI itself needs nothing (an injected field is a plain
   `INTERFACE` call; one implementation gives an exact answer, several give a superset).
   - Framework entry points (own ADR, parser change): read Spring annotations with RUNTIME retention (`@GetMapping` and
