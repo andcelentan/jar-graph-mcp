@@ -78,8 +78,7 @@ public class FindImplementationsTool {
 
     private static String notFoundNote(String className, String methodName, List<String> classes) {
         if (classes.isEmpty()) {
-            return ("No class of the analysis is named '%s': it may belong to the JDK, a library or another jar, or "
-                    + "the name may be misspelled.").formatted(className);
+            return Notes.classNotFound(className);
         }
         List<String> names = classes.stream().map(SourceNames::binaryName).toList();
         return ("%s: no method named '%s' is declared there. It may be inherited from a supertype, or from the JDK "

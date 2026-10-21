@@ -23,7 +23,10 @@ public class McpFixture {
             OrderRepository.class,
             OrderAuditor.class,
             Store.class,
-            OrderStore.class
+            OrderStore.class,
+            Checkout.class,
+            Legacy.class,
+            Legacy.Order.class
     };
 
     // --- Interface with two implementations, one inheriting a concrete method ---
@@ -92,6 +95,27 @@ public class McpFixture {
     public static class OrderStore implements Store<Order> {
         @Override
         public void save(Order order) {
+        }
+    }
+
+    // --- Lambda: javac moves its body to a synthetic method, lambda$checkoutAll$0 ---
+
+    public static class Checkout {
+        private final PaymentService payments;
+
+        public Checkout(PaymentService payments) {
+            this.payments = payments;
+        }
+
+        public void checkoutAll(List<String> orderIds) {
+            orderIds.forEach(orderId -> payments.pay(orderId));
+        }
+    }
+
+    // --- Same simple name as McpFixture.Order: a simple name may match several classes ---
+
+    public static class Legacy {
+        public static class Order {
         }
     }
 }

@@ -8,8 +8,8 @@ Bytecode analyzer (ASM) → Neo4j knowledge graph → MCP server that lets AI as
 (classes, methods, calls, hierarchies) deterministically instead of guessing it.
 
 - `analyzer`: JAR parsing + graph persistence (current focus).
-- `mcp-server`: Spring AI 2.0.1 / Spring Boot 4.1.1 MCP server over STDIO (ADR-0009): `find_implementations`, more
-  tools in progress.
+- `mcp-server`: Spring AI 2.0.1 / Spring Boot 4.1.1 MCP server over STDIO (ADR-0009): `find_implementations`,
+  `describe_class`, more tools in progress.
 - Target: event-driven on AWS, provisioned with Terraform (S3 upload → EventBridge → ECS/Fargate analysis task;
   Neo4j Aura/self-managed or Neptune; MCP server as an ECS service; OAuth 2.1 for MCP clients, e.g. Cognito; IAM roles
   between AWS services). Local design choices should not block that path.
@@ -121,19 +121,28 @@ tool call.
   (`maven.compiler.parameters`). Results are records that Spring AI serializes with its own Jackson 3 mapper as text
   content (no output schema); `@JsonInclude` drops fields that do not apply. A `RuntimeException` becomes a result
   with `isError: true` that the model reads: throw `IllegalArgumentException` for malformed input.
-- `GraphQueries` returns facts in graph identifiers (`MethodInfo`, internal names, signatures), always in
-  `executeRead`; tools write the words. Analyzed classes are the `Class` nodes with a `kind` (stubs only have `fqcn`).
+- `GraphQueries` returns facts in graph identifiers (`MethodInfo`, `ClassInfo`, internal names, signatures), always
+  in `executeRead`; tools convert them to the records the assistant sees (`MethodSummary`, `ClassDescription`,
+  `TypeSummary`, built by their static `of(...)`) and write the words. `graph` never depends on `tool`. Analyzed
+  classes are the `Class` nodes with a `kind` (stubs only have `fqcn`). Several lists per row come from `COLLECT { }`
+  subqueries, never from chained `OPTIONAL MATCH`es (they multiply rows); hierarchy traversals always name their
+  relationship types.
 - Tools are context, not proof: partial answers beat refusals. Class names match like the assistant knows them:
   simple, partially or fully qualified, nested as `Outer.Inner` or `Outer$Inner` (`SourceNames.dottedClassName`), on
   whole name segments (`PaymentService` never matches `CardPaymentService`). Every matching class and every overload
   is returned, each with its class and parameter types, and the assistant picks. Output uses binary names
   (`com.acme.Outer$Inner`).
 - An empty answer always has a `note` saying why (ADR-0009): no such class, class found but method not declared
-  there, abstract with no implementation, Spring Data repository.
+  there, abstract with no implementation, Spring Data repository. Notes shared by several tools live in `Notes`.
+- Lambda bodies (`lambda$<enclosing>$<n>`, synthetic methods made by javac) are kept and flagged
+  (`MethodSummary.isLambdaBody`, recognized by name, written to JSON only when true), like bridges in the graph.
+  `describe_class` lists direct supertypes (`inAnalysis` false for stubs) and direct subtypes only: the assistant walks
+  the hierarchy one class at a time.
 - Tests: `FixtureGraph` writes the graph of `McpFixture` with the real analyzer pipeline (analyzer `test-jar`) to one
   Neo4j container shared by the whole test JVM (singleton container). Spring Data types are stand-ins under
   `src/test/java/org/springframework/data/`, never packaged in the fixture jar. Tools are tested by calling their
-  methods. Failsafe reads `classesDirectory` because `repackage` replaces the module jar.
+  methods; `DescribeClassToolIT` is the specification of `describe_class`. Failsafe reads `classesDirectory` because
+  `repackage` replaces the module jar.
 
 ## Working agreement
 
