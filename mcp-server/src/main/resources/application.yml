@@ -1,0 +1,25 @@
+# STDIO transport (ADR-0009): standard output carries only MCP JSON-RPC messages
+spring:
+  main:
+    web-application-type: none   # no embedded web server: requests come from stdin, not HTTP
+    banner-mode: off             # the Spring banner would be printed on stdout and break the protocol
+  ai:
+    mcp:
+      server:
+        name: jar-graph-mcp      # how the server introduces itself to the client during the handshake
+        version: 1.0.0
+        type: SYNC               # tools are plain blocking methods (no Reactor types)
+        stdio: true
+        # Sent to the client in the initialize response: how the assistant should use this server as a whole
+        instructions: >-
+          Answers questions about the structure of an analyzed Java application from its compiled bytecode:
+          implementations, calls, class hierarchies. Answers are facts from the code, not guesses. Prefer these tools
+          to searching the source when you need them. Class names can be simple (OrderService) or qualified
+          (com.acme.OrderService): every matching class is returned. When a result is empty, read its note before
+          drawing conclusions.
+  # Same environment variables as the analyzer (ADR-0004); the defaults match docker-compose.yml for local use
+  neo4j:
+    uri: ${NEO4J_URI:bolt://localhost:7687}
+    authentication:
+      username: ${NEO4J_USERNAME:neo4j}
+      password: ${NEO4J_PASSWORD:password123}
