@@ -26,7 +26,10 @@ public class McpFixture {
             OrderStore.class,
             Checkout.class,
             Legacy.class,
-            Legacy.Order.class
+            Legacy.Order.class,
+            Receipts.class,
+            CardRefunds.class,
+            Orders.class
     };
 
     // --- Interface with two implementations, one inheriting a concrete method ---
@@ -116,6 +119,35 @@ public class McpFixture {
 
     public static class Legacy {
         public static class Order {
+        }
+    }
+
+    // --- Callers: a static call never dispatches ---
+
+    public static class Receipts {
+        public static String format(String orderId) {
+            return orderId;
+        }
+
+        public String print(String orderId) {
+            return format(orderId);
+        }
+    }
+
+    // --- Callers: bytecode names CardPaymentService, which inherits refund, so the call points at
+    //     AbstractPaymentService#refund (ADR-0008): it can never run PaypalPaymentService#refund ---
+
+    public static class CardRefunds {
+        public void refundCard(CardPaymentService card, String orderId) {
+            card.refund(orderId);
+        }
+    }
+
+    // --- Callers: an INTERFACE call to Store#save(Object) reaches OrderStore#save(Order) through the bridge ---
+
+    public static class Orders {
+        public void keep(Store<Order> store, Order order) {
+            store.save(order);
         }
     }
 }
