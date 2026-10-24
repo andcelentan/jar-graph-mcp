@@ -23,3 +23,9 @@ spring:
     authentication:
       username: ${NEO4J_USERNAME:neo4j}
       password: ${NEO4J_PASSWORD:password123}
+
+# Limits of the read-only Cypher written by assistants through query_graph (ADR-0009)
+jar-graph:
+  query-graph:
+    timeout: 5s
+    max-rows: 100
