@@ -62,7 +62,7 @@ public class FindImplementationsTool {
                 .map(FindImplementationsTool::toMethodImplementations)
                 .toList();
         return new FindImplementationsResult(methods,
-                methods.isEmpty() ? notFoundNote(className, methodName, search.classes()) : null);
+                methods.isEmpty() ? Notes.nothingFound(className, methodName, search.classes()) : null);
     }
 
     private static MethodImplementations toMethodImplementations(Implementations found) {
@@ -74,14 +74,5 @@ public class FindImplementationsTool {
                 MethodSummary.of(found.method()),
                 MethodSummary.of(found.implementations()),
                 note);
-    }
-
-    private static String notFoundNote(String className, String methodName, List<String> classes) {
-        if (classes.isEmpty()) {
-            return Notes.classNotFound(className);
-        }
-        List<String> names = classes.stream().map(SourceNames::binaryName).toList();
-        return ("%s: no method named '%s' is declared there. It may be inherited from a supertype, or from the JDK "
-                + "or a library.").formatted(String.join(", ", names), methodName);
     }
 }
