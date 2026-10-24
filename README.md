@@ -49,8 +49,8 @@ flowchart LR
 | Inheritance and override resolution (abstract classes, interface hierarchies) | ✅ Done |
 | Bridge methods (generics, covariant return types) | ✅ Done |
 | Call resolution (inherited methods, `super` and static calls) | ✅ Done |
-| MCP server: `find_implementations`, `describe_class` (STDIO) | ✅ Done |
-| MCP server: `find_callers`, read-only Cypher, graph model resource | 🚧 Next |
+| MCP server: `find_implementations`, `describe_class`, `find_callers` (STDIO) | ✅ Done |
+| MCP server: read-only Cypher, graph model resource | 🚧 Next |
 | Nested archives (Spring Boot fat jar, WAR, EAR) | 📋 Planned |
 | Parser fidelity (lambdas / method references) | 📋 Planned |
 | AWS deployment | 📋 Planned |
@@ -103,13 +103,14 @@ Register it in an MCP client, e.g. in the `.mcp.json` of a project for Claude Co
 }
 ```
 
-The assistant can then answer questions like *"what runs when `PaymentService.pay` is called?"* or *"what does
-`JarReader` contain?"* from the graph instead of guessing:
+The assistant can then answer questions like *"what runs when `PaymentService.pay` is called?"*, *"who calls
+`OrderRepository.save`?"* or *"what does `JarReader` contain?"* from the graph instead of guessing:
 
 | Tool | Answers |
 |------|---------|
 | `find_implementations` | The concrete methods that may run when a method is called: the method itself if it has a body, plus every override. Notes abstract methods with no implementation and Spring Data repositories, implemented at run time. |
 | `describe_class` | A class's kind, direct supertypes (flagged when outside the analysis) and subtypes, and declared methods, lambda bodies flagged. |
+| `find_callers` | The calls that may run a method: direct calls, plus calls to a method it overrides that may dispatch to it (shown with `through`). "No caller" comes with a note: entry points, framework callbacks and reflection are not visible in bytecode. |
 
 Class names can be simple (`JarReader`) or qualified (`com.jgraph.analyzer.parser.JarReader`): every matching class
 and every overload is returned, and the assistant picks.

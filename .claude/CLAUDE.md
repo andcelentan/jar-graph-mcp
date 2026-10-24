@@ -9,7 +9,7 @@ Bytecode analyzer (ASM) → Neo4j knowledge graph → MCP server that lets AI as
 
 - `analyzer`: JAR parsing + graph persistence (current focus).
 - `mcp-server`: Spring AI 2.0.1 / Spring Boot 4.1.1 MCP server over STDIO (ADR-0009): `find_implementations`,
-  `describe_class`, more tools in progress.
+  `describe_class`, `find_callers`; `query_graph` and the graph model resource still to come.
 - Target: event-driven on AWS, provisioned with Terraform (S3 upload → EventBridge → ECS/Fargate analysis task;
   Neo4j Aura/self-managed or Neptune; MCP server as an ECS service; OAuth 2.1 for MCP clients, e.g. Cognito; IAM roles
   between AWS services). Local design choices should not block that path.
@@ -123,17 +123,23 @@ tool call.
   with `isError: true` that the model reads: throw `IllegalArgumentException` for malformed input.
 - `GraphQueries` returns facts in graph identifiers (`MethodInfo`, `ClassInfo`, internal names, signatures), always
   in `executeRead`; tools convert them to the records the assistant sees (`MethodSummary`, `ClassDescription`,
-  `TypeSummary`, built by their static `of(...)`) and write the words. `graph` never depends on `tool`. Analyzed
-  classes are the `Class` nodes with a `kind` (stubs only have `fqcn`). Several lists per row come from `COLLECT { }`
-  subqueries, never from chained `OPTIONAL MATCH`es (they multiply rows); hierarchy traversals always name their
-  relationship types.
+  `TypeSummary`, `CallerSummary`, built by their static `of(...)`) and write the words. `graph` never depends on
+  `tool`. Every query starts with `MATCH_CLASSES_BY_NAME` (analyzed classes are the `Class` nodes with a `kind`; stubs
+  only have `fqcn`). Several lists per row come from `COLLECT { }` subqueries, never from chained `OPTIONAL MATCH`es
+  (they multiply rows); hierarchy traversals always name their relationship types.
+- `find_callers` reads the ADR-0008 resolution query backwards: `(method)-[:OVERRIDES*0..]->(calledMethod)<-[call:CALLS]-
+  (caller)`, zero steps for direct calls (any instruction), more only for `VIRTUAL`/`INTERFACE`. A dispatched call
+  shows `through` (the overridden method it names); bridges are never callers. Known superset: sibling overrides via
+  calls on a concrete inheriting type (receiver filtering deferred, exact between classes only). Callers through
+  method references are missing (`invokedynamic`), and the tool description says so.
 - Tools are context, not proof: partial answers beat refusals. Class names match like the assistant knows them:
   simple, partially or fully qualified, nested as `Outer.Inner` or `Outer$Inner` (`SourceNames.dottedClassName`), on
   whole name segments (`PaymentService` never matches `CardPaymentService`). Every matching class and every overload
   is returned, each with its class and parameter types, and the assistant picks. Output uses binary names
   (`com.acme.Outer$Inner`).
 - An empty answer always has a `note` saying why (ADR-0009): no such class, class found but method not declared
-  there, abstract with no implementation, Spring Data repository. Notes shared by several tools live in `Notes`.
+  there, abstract with no implementation, Spring Data repository, no callers ("not necessarily unused": entry points,
+  framework, reflection, other jars, method references). Notes shared by several tools live in `Notes`.
 - Lambda bodies (`lambda$<enclosing>$<n>`, synthetic methods made by javac) are kept and flagged
   (`MethodSummary.isLambdaBody`, recognized by name, written to JSON only when true), like bridges in the graph.
   `describe_class` lists direct supertypes (`inAnalysis` false for stubs) and direct subtypes only: the assistant walks
@@ -141,8 +147,8 @@ tool call.
 - Tests: `FixtureGraph` writes the graph of `McpFixture` with the real analyzer pipeline (analyzer `test-jar`) to one
   Neo4j container shared by the whole test JVM (singleton container). Spring Data types are stand-ins under
   `src/test/java/org/springframework/data/`, never packaged in the fixture jar. Tools are tested by calling their
-  methods; `DescribeClassToolIT` is the specification of `describe_class`. Failsafe reads `classesDirectory` because
-  `repackage` replaces the module jar.
+  methods; `DescribeClassToolIT` and `FindCallersToolIT` are specifications (validated by mutating the
+  implementation). Failsafe reads `classesDirectory` because `repackage` replaces the module jar.
 
 ## Working agreement
 
@@ -168,14 +174,9 @@ persistence, graph model, configuration or test strategy.
 - `ClassFileSource` abstraction (separate PR): recurse into nested archives (Spring Boot fat jar, WAR, EAR), package
   include filter, skip `META-INF/versions/**`, first-wins on duplicate classes. Input is the CI build artifact
   (ADR-0002); multi-JAR inputs and `target/classes` dirs are out of scope unless a new ADR says otherwise.
-- MCP server (ADR-0009): `find_implementations` and `describe_class` done (first PR). Next, one branch and PR each:
-  - `find_callers`: the ADR-0008 resolution query read backwards (direct callers, plus `VIRTUAL`/`INTERFACE` calls to
-    a declaration the method overrides, shown with a `through` field); bridges never listed as callers; "no callers"
-    note saying it is not necessarily dead code (framework entry points, reflection, other jars); callers through
-    method references are missing (`invokedynamic`) and the description must say so. Receiver filtering (sibling
-    overrides) deferred: exact between classes only.
-  - `query_graph` (`EXPLAIN` check of the query type, read transaction, timeout, row limit), the `graph://model`
-    resource, the end-to-end STDIO test with the SDK client.
+- MCP server (ADR-0009): `find_implementations`, `describe_class` and `find_callers` done. Next, one branch and PR
+  each: `query_graph` (`EXPLAIN` check of the query type, read transaction, timeout, row limit), the `graph://model`
+  resource, the end-to-end STDIO test with the SDK client.
   - Requirement for every tool: **never an empty answer without saying why.** Same gap as Spring Data for other
     runtime-generated implementations (Feign clients); MapStruct and Lombok are fine (code generated at compile time,
     present in the JAR).
@@ -188,7 +189,9 @@ persistence, graph model, configuration or test strategy.
   - Later: narrow implementations with `@Qualifier`/`@Primary`; flag self-invocation of `@Transactional` methods
     (`this.m()` bypasses the Spring proxy, so no transaction starts).
 - Deferred by ADR-0008: restrict dispatch to the receiver's subtypes (sibling overrides) using `receiver`, likely inside
-  MCP tools; resolve methods inherited from implicit/external supertypes (e.g. `Enum#name()`).
+  MCP tools (`find_callers`, `find_implementations`); exact only when receiver and method owner are both classes
+  (single inheritance), since with interfaces a common subtype may exist outside the analysis. Resolve methods
+  inherited from implicit/external supertypes (e.g. `Enum#name()`).
 - Parser fidelity: `invokedynamic` (lambda/method-ref call chains), exact `@Transactional` descriptors + class-level
   annotation, consistent type naming.
 - Repository: mark stub nodes (`external = true`); driver ownership in `close()`.
