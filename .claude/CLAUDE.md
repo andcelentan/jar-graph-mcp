@@ -112,20 +112,24 @@ load). `ModelResolver` is the only public class of the `resolver` package and fi
 
 ## MCP server architecture
 
-Tool (package `tool`, e.g. `FindImplementationsTool`) → `GraphQueries` (package `graph`) → the Neo4j `Driver`
-auto-configured by Spring Boot (`spring.neo4j.*` in `application.yml`, same env vars as the analyzer). One query per
-tool call.
+Packages by feature, one per tool: `implementations`, `callers`, `classes`, `cypher` (`query_graph` and the
+`graph://model` resource), plus `shared` (`MethodInfo`, `MethodSummary`, `SourceNames`, `Notes`, `GraphSupport` with
+`MATCH_CLASSES_BY_NAME` and `toMethodInfo`). Inside a feature: `XxxTool` (`@McpTool`) → `XxxQuery` (Cypher and
+mapping) → the Neo4j `Driver` auto-configured by Spring Boot (`spring.neo4j.*` in `application.yml`, same env vars as
+the analyzer). One query per tool call. **A new tool is a new package.** Only `shared`, the tools and the records
+serialized to JSON are `public`; queries, fact records and constructors are package-private (Spring injects them
+anyway). Tests mirror the packages.
 
 - Tools are `@Component` beans with `@McpTool` methods, registered by Spring AI's annotation scanner. Arguments are
   bound and named in the schema after the Java parameters, so the module compiles with `-parameters`
   (`maven.compiler.parameters`). Results are records that Spring AI serializes with its own Jackson 3 mapper as text
   content (no output schema); `@JsonInclude` drops fields that do not apply. A `RuntimeException` becomes a result
   with `isError: true` that the model reads: throw `IllegalArgumentException` for malformed input.
-- `GraphQueries` returns facts in graph identifiers (`MethodInfo`, `ClassInfo`, internal names, signatures), always
-  in `executeRead`; tools convert them to the records the assistant sees (`MethodSummary`, `ClassDescription`,
-  `TypeSummary`, `CallerSummary`, built by their static `of(...)`) and write the words. `graph` never depends on
-  `tool`. Every query starts with `MATCH_CLASSES_BY_NAME` (analyzed classes are the `Class` nodes with a `kind`; stubs
-  only have `fqcn`). Several lists per row come from `COLLECT { }` subqueries, never from chained `OPTIONAL MATCH`es
+- Queries return facts in graph identifiers (`MethodInfo`, `ClassInfo`, internal names, signatures), always in
+  `executeRead`; tools convert them to the records the assistant sees (`MethodSummary`, `ClassDescription`,
+  `TypeSummary`, `CallerSummary`, built by their static `of(...)`) and write the words. Fact records never reference
+  view records. Every query starts with `GraphSupport.MATCH_CLASSES_BY_NAME` (analyzed classes are the `Class` nodes
+  with a `kind`; stubs only have `fqcn`). Several lists per row come from `COLLECT { }` subqueries, never from chained `OPTIONAL MATCH`es
   (they multiply rows); hierarchy traversals always name their relationship types.
 - `find_callers` reads the ADR-0008 resolution query backwards: `(method)-[:OVERRIDES*0..]->(calledMethod)<-[call:CALLS]-
   (caller)`, zero steps for direct calls (any instruction), more only for `VIRTUAL`/`INTERFACE`. A dispatched call
