@@ -50,7 +50,8 @@ flowchart LR
 | Bridge methods (generics, covariant return types) | ✅ Done |
 | Call resolution (inherited methods, `super` and static calls) | ✅ Done |
 | MCP server: `find_implementations`, `describe_class`, `find_callers` (STDIO) | ✅ Done |
-| MCP server: read-only Cypher, graph model resource | 🚧 Next |
+| MCP server: guarded read-only Cypher (`query_graph`), graph model resource | ✅ Done |
+| MCP server: end-to-end test with an MCP client | 🚧 Next |
 | Nested archives (Spring Boot fat jar, WAR, EAR) | 📋 Planned |
 | Parser fidelity (lambdas / method references) | 📋 Planned |
 | AWS deployment | 📋 Planned |
@@ -111,6 +112,10 @@ The assistant can then answer questions like *"what runs when `PaymentService.pa
 | `find_implementations` | The concrete methods that may run when a method is called: the method itself if it has a body, plus every override. Notes abstract methods with no implementation and Spring Data repositories, implemented at run time. |
 | `describe_class` | A class's kind, direct supertypes (flagged when outside the analysis) and subtypes, and declared methods, lambda bodies flagged. |
 | `find_callers` | The calls that may run a method: direct calls, plus calls to a method it overrides that may dispatch to it (shown with `through`). "No caller" comes with a note: entry points, framework callbacks and reflection are not visible in bytecode. |
+| `query_graph` | Any other question, as read-only Cypher written by the assistant: checked with `EXPLAIN` (no writes, `LOAD CSV`, procedures or admin commands, see [ADR-0010](docs/adr/0010-guard-query-graph-by-plan-operators.md)), run in a read transaction with a timeout and a row limit. |
+
+The resource `graph://model` describes nodes, relationships and the rules of a correct query, for assistants writing
+Cypher.
 
 Class names can be simple (`JarReader`) or qualified (`com.jgraph.analyzer.parser.JarReader`): every matching class
 and every overload is returned, and the assistant picks.

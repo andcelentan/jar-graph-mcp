@@ -14,3 +14,4 @@ Format: [Michael Nygard's ADR](https://cognitect.com/blog/2011/11/15/documenting
 | [0007](0007-keep-bridge-methods-and-attribute-overrides.md) | Keep bridge methods and attribute their overrides to the bridged method | Accepted |
 | [0008](0008-point-calls-at-declared-method.md) | Point calls at the declared method and record how they are invoked | Accepted |
 | [0009](0009-mcp-server-with-spring-ai.md) | MCP server with Spring AI: STDIO first, read-only graph queries | Accepted |
+| [0010](0010-guard-query-graph-by-plan-operators.md) | Guard query_graph by plan operators, not only by query type | Accepted |

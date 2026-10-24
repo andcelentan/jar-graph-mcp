@@ -9,7 +9,7 @@ Bytecode analyzer (ASM) → Neo4j knowledge graph → MCP server that lets AI as
 
 - `analyzer`: JAR parsing + graph persistence (current focus).
 - `mcp-server`: Spring AI 2.0.1 / Spring Boot 4.1.1 MCP server over STDIO (ADR-0009): `find_implementations`,
-  `describe_class`, `find_callers`; `query_graph` and the graph model resource still to come.
+  `describe_class`, `find_callers`, `query_graph` and the `graph://model` resource.
 - Target: event-driven on AWS, provisioned with Terraform (S3 upload → EventBridge → ECS/Fargate analysis task;
   Neo4j Aura/self-managed or Neptune; MCP server as an ECS service; OAuth 2.1 for MCP clients, e.g. Cognito; IAM roles
   between AWS services). Local design choices should not block that path.
@@ -132,6 +132,14 @@ tool call.
   shows `through` (the overridden method it names); bridges are never callers. Known superset: sibling overrides via
   calls on a concrete inheriting type (receiver filtering deferred, exact between classes only). Callers through
   method references are missing (`invokedynamic`), and the tool description says so.
+- `query_graph` runs Cypher written by the assistant through `ReadOnlyCypherRunner` (ADR-0009, ADR-0010): `EXPLAIN`
+  first, rejected unless `READ_ONLY` **and** free of the plan operators `LoadCSV`, `ProcedureCall`, `Show*`,
+  `Terminate*` (Neo4j classifies those as read-only too); then a read transaction with a timeout, reading at most
+  `max-rows` rows plus one to detect truncation (`QueryGraphProperties`, `jar-graph.query-graph.*`). Rejections throw
+  `QueryRejectedException` with a message telling the assistant what to change. `CypherValues` turns any result into
+  plain values (nodes and relationships as maps, no internal ids). `GraphModelResource` serves
+  `src/main/resources/graph-model.md` as `graph://model`: **a change to the graph model must update that file**, and
+  the summary in the `query_graph` description.
 - Tools are context, not proof: partial answers beat refusals. Class names match like the assistant knows them:
   simple, partially or fully qualified, nested as `Outer.Inner` or `Outer$Inner` (`SourceNames.dottedClassName`), on
   whole name segments (`PaymentService` never matches `CardPaymentService`). Every matching class and every overload
@@ -147,8 +155,8 @@ tool call.
 - Tests: `FixtureGraph` writes the graph of `McpFixture` with the real analyzer pipeline (analyzer `test-jar`) to one
   Neo4j container shared by the whole test JVM (singleton container). Spring Data types are stand-ins under
   `src/test/java/org/springframework/data/`, never packaged in the fixture jar. Tools are tested by calling their
-  methods; `DescribeClassToolIT` and `FindCallersToolIT` are specifications (validated by mutating the
-  implementation). Failsafe reads `classesDirectory` because `repackage` replaces the module jar.
+  methods; `DescribeClassToolIT`, `FindCallersToolIT` and `QueryGraphToolIT` are specifications (validated by
+  mutating the implementation). `QueryGraphToolIT` checks after each test that no write reached the shared graph. Failsafe reads `classesDirectory` because `repackage` replaces the module jar.
 
 ## Working agreement
 
@@ -174,9 +182,8 @@ persistence, graph model, configuration or test strategy.
 - `ClassFileSource` abstraction (separate PR): recurse into nested archives (Spring Boot fat jar, WAR, EAR), package
   include filter, skip `META-INF/versions/**`, first-wins on duplicate classes. Input is the CI build artifact
   (ADR-0002); multi-JAR inputs and `target/classes` dirs are out of scope unless a new ADR says otherwise.
-- MCP server (ADR-0009): `find_implementations`, `describe_class` and `find_callers` done. Next, one branch and PR
-  each: `query_graph` (`EXPLAIN` check of the query type, read transaction, timeout, row limit), the `graph://model`
-  resource, the end-to-end STDIO test with the SDK client.
+- MCP server (ADR-0009): all tools and the `graph://model` resource done. Next (own branch): the end-to-end STDIO
+  test with the SDK client; then Streamable HTTP with authentication (own ADR) for AWS.
   - Requirement for every tool: **never an empty answer without saying why.** Same gap as Spring Data for other
     runtime-generated implementations (Feign clients); MapStruct and Lombok are fine (code generated at compile time,
     present in the JAR).

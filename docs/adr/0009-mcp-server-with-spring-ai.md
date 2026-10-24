@@ -4,7 +4,7 @@ Date: 2026-10-18
 
 ## Status
 
-Accepted
+Accepted, amended by [ADR-0010](0010-guard-query-graph-by-plan-operators.md) (query_graph checks)
 
 ## Context
 
