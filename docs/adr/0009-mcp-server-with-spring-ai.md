@@ -4,7 +4,8 @@ Date: 2026-10-18
 
 ## Status
 
-Accepted, amended by [ADR-0010](0010-guard-query-graph-by-plan-operators.md) (query_graph checks)
+Accepted, amended by [ADR-0010](0010-guard-query-graph-by-plan-operators.md) (query_graph checks) and
+[ADR-0011](0011-serialize-stdio-tool-calls.md) (STDIO tool calls)
 
 ## Context
 
