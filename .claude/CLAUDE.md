@@ -40,6 +40,8 @@ analyzer. Effective versions differ between modules: JUnit 6 (from Spring Boot) 
 the Neo4j driver version of the root `pom.xml` wins in both. With STDIO, stdout carries only JSON-RPC: no banner, no
 web server, logs on stderr (`logback-spring.xml`). Do not probe the server from PowerShell 5.1: it writes a UTF-8 BOM
 on stdin and the first message fails to parse; use a bash coprocess or the SDK client.
+On Windows a running MCP client (a Claude Code session with the `jar-graph` server) locks the packaged jar: stop it
+before `package`/`verify`, or `repackage` fails with "Unable to rename".
 
 Java 21, Maven multi-module; dependency versions and BOMs live in the root `pom.xml`. No linter/formatter configured.
 DB config: `analyzer/src/main/resources/application.properties`, overridden by env vars `NEO4J_URI`,
@@ -114,7 +116,7 @@ load). `ModelResolver` is the only public class of the `resolver` package and fi
 
 Packages by feature, one per tool: `implementations`, `callers`, `classes`, `cypher` (`query_graph` and the
 `graph://model` resource), plus `shared` (`MethodInfo`, `MethodSummary`, `SourceNames`, `Notes`, `GraphSupport` with
-`MATCH_CLASSES_BY_NAME` and `toMethodInfo`). Inside a feature: `XxxTool` (`@McpTool`) → `XxxQuery` (Cypher and
+`MATCH_CLASSES_BY_NAME` and `toMethodInfo`) and `transport` (STDIO configuration, below). Inside a feature: `XxxTool` (`@McpTool`) → `XxxQuery` (Cypher and
 mapping) → the Neo4j `Driver` auto-configured by Spring Boot (`spring.neo4j.*` in `application.yml`, same env vars as
 the analyzer). One query per tool call. **A new tool is a new package.** Only `shared`, the tools and the records
 serialized to JSON are `public`; queries, fact records and constructors are package-private (Spring injects them
@@ -161,6 +163,15 @@ anyway). Tests mirror the packages.
   `src/test/java/org/springframework/data/`, never packaged in the fixture jar. Tools are tested by calling their
   methods; `DescribeClassToolIT`, `FindCallersToolIT` and `QueryGraphToolIT` are specifications (validated by
   mutating the implementation). `QueryGraphToolIT` checks after each test that no write reached the shared graph. Failsafe reads `classesDirectory` because `repackage` replaces the module jar.
+- STDIO (ADR-0011): the SDK 2.0.0 transport queues outgoing messages in a `Sinks.many().unicast()` that accepts one
+  producer at a time, so two tool calls finishing together on `boundedElastic` threads lose a response ("Failed to
+  enqueue message"), and that error ends the transport's inbound pipeline: the server never answers again. `StdioTransportConfiguration` declares, only when
+  `spring.ai.mcp.server.stdio=true`, a `McpSyncServerCustomizer` setting `immediateExecution(true)`: tools run on the
+  single thread reading standard input, one at a time, and that thread emits every response. Spring AI injects a
+  single customizer (`Optional`): merge any new one into this bean. `StdioTransportIT` runs the packaged jar as a
+  process (failsafe passes its path as `mcp-server.jar`), sends 200 calls without waiting and requires every response
+  and a clean exit on end of input; it talks raw JSON-RPC through `JsonRpcPeer`, never the SDK client (same queue on
+  the client side). Re-run it on every SDK or Spring AI upgrade.
 
 ## Working agreement
 
@@ -186,8 +197,10 @@ persistence, graph model, configuration or test strategy.
 - `ClassFileSource` abstraction (separate PR): recurse into nested archives (Spring Boot fat jar, WAR, EAR), package
   include filter, skip `META-INF/versions/**`, first-wins on duplicate classes. Input is the CI build artifact
   (ADR-0002); multi-JAR inputs and `target/classes` dirs are out of scope unless a new ADR says otherwise.
-- MCP server (ADR-0009): all tools and the `graph://model` resource done. Next (own branch): the end-to-end STDIO
-  test with the SDK client; then Streamable HTTP with authentication (own ADR) for AWS.
+- MCP server (ADR-0009): all tools, the `graph://model` resource and the end-to-end STDIO test (`StdioTransportIT`,
+  ADR-0011) done. Next (own branch): Streamable HTTP with authentication (own ADR) for AWS; set
+  `spring.ai.mcp.server.protocol: STREAMABLE` and `stdio: false` explicitly (unset, Spring AI 2.0.1 starts the
+  deprecated SSE transport).
   - Requirement for every tool: **never an empty answer without saying why.** Same gap as Spring Data for other
     runtime-generated implementations (Feign clients); MapStruct and Lombok are fine (code generated at compile time,
     present in the JAR).
