@@ -99,13 +99,17 @@
         <plugins>
             <!--
               Integration tests run after `package`, when the module jar is already the repackaged Spring Boot jar
-              (classes under BOOT-INF/classes): point failsafe at the compiled classes instead.
+              (classes under BOOT-INF/classes): point failsafe at the compiled classes instead. StdioTransportIT
+              starts that jar as a process, the way an MCP client does.
             -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <configuration>
                     <classesDirectory>${project.build.outputDirectory}</classesDirectory>
+                    <systemPropertyVariables>
+                        <mcp-server.jar>${project.build.directory}/${project.build.finalName}.jar</mcp-server.jar>
+                    </systemPropertyVariables>
                 </configuration>
             </plugin>
             <!-- Repackages the jar with its dependencies, so a client can start it with `java -jar` -->
