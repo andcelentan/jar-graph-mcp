@@ -41,6 +41,12 @@ public final class FixtureGraph {
         return driver;
     }
 
+    /** Where the loaded graph is served, for a server started in another process (authentication disabled). */
+    public static synchronized String boltUrl() {
+        driver();
+        return NEO4J.getBoltUrl();
+    }
+
     private static void load(Driver driver) {
         try {
             Path jarPath = Files.createTempFile("mcp-fixture", ".jar");

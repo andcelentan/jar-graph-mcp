@@ -51,7 +51,8 @@ flowchart LR
 | Call resolution (inherited methods, `super` and static calls) | ✅ Done |
 | MCP server: `find_implementations`, `describe_class`, `find_callers` (STDIO) | ✅ Done |
 | MCP server: guarded read-only Cypher (`query_graph`), graph model resource | ✅ Done |
-| MCP server: end-to-end test with an MCP client | 🚧 Next |
+| MCP server: STDIO transport safe for parallel tool calls, end-to-end test over STDIO | ✅ Done |
+| MCP server: Streamable HTTP with authentication | 🚧 Next |
 | Nested archives (Spring Boot fat jar, WAR, EAR) | 📋 Planned |
 | Parser fidelity (lambdas / method references) | 📋 Planned |
 | AWS deployment | 📋 Planned |
