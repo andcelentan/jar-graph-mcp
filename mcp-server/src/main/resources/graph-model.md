@@ -1,8 +1,9 @@
 # Code graph model
 
-The graph is written by the analyzer from the compiled bytecode of one application jar: facts from the code, not
-guesses. Read it with the `query_graph` tool (read-only Cypher). Prefer `find_implementations`, `find_callers` and
-`describe_class` when they answer the question: they apply the rules below for you.
+The graph is written by the analyzer from the compiled bytecode of one application archive (jar, war or ear, with
+the jars nested in it), limited to the packages chosen for the analysis: facts from the code, not guesses. Read it
+with the `query_graph` tool (read-only Cypher). Prefer `find_implementations`, `find_callers` and `describe_class`
+when they answer the question: they apply the rules below for you.
 
 ## Nodes and relationships
 
@@ -25,8 +26,9 @@ guesses. Read it with the `query_graph` tool (read-only Cypher). Prefer `find_im
 
 ## Rules for correct queries
 
-1. **Stubs.** Types and methods only referenced by the application (JDK, libraries) are stub nodes: classes without
-   `kind`, methods without an incoming `DECLARES`. Filter analyzed classes with `c.kind IS NOT NULL`.
+1. **Stubs.** Types and methods only referenced by the application (JDK, libraries, packages left out of the
+   analysis) are stub nodes: classes without `kind`, methods without an incoming `DECLARES`. Filter analyzed classes
+   with `c.kind IS NOT NULL`.
 2. **Implicit supertypes are never linked**: `java/lang/Object`, `Record`, `Enum`, `annotation/Annotation`.
 3. **Bridges.** javac adds bridge methods for generics and covariant returns. They are kept, flagged
    `isBridge = true`, and never own `OVERRIDES`: exclude them with `NOT m.isBridge` when listing methods.
