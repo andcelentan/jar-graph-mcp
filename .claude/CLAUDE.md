@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Bytecode analyzer (ASM) → Neo4j knowledge graph → MCP server that lets AI assistants query real code structure
 (classes, methods, calls, hierarchies) deterministically instead of guessing it.
 
-- `analyzer`: JAR parsing + graph persistence (current focus).
+- `analyzer`: archive parsing (jar, war, ear, nested jars; ADR-0012) + graph persistence.
 - `mcp-server`: Spring AI 2.0.1 / Spring Boot 4.1.1 MCP server over STDIO (ADR-0009): `find_implementations`,
   `describe_class`, `find_callers`, `query_graph` and the `graph://model` resource.
 - Target: event-driven on AWS, provisioned with Terraform (S3 upload → EventBridge → ECS/Fargate analysis task;
@@ -22,11 +22,11 @@ mvn -pl analyzer -am test            # unit tests, no Docker needed
 mvn -pl analyzer -am verify          # + integration tests (*IT, Testcontainers): Docker must be running
 
 # Single unit test / single integration test method
-mvn -pl analyzer -am test -Dtest=JarReaderTest -Dsurefire.failIfNoSpecifiedTests=false
+mvn -pl analyzer -am test -Dtest=BytecodeReaderTest -Dsurefire.failIfNoSpecifiedTests=false
 mvn -pl analyzer -am verify -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false -Dit.test='Neo4jGraphRepositoryIT#saveShouldBeIdempotent'
 
-# Run the analyzer (compile first). It WIPES the target Neo4j database before writing.
-mvn -q -pl analyzer exec:java -Dexec.mainClass=com.jgraph.analyzer.AppAnalyzer -Dexec.args=path/to/app.jar
+# Run the analyzer (compile first) on a .jar/.war/.ear. It WIPES the target Neo4j database before writing.
+mvn -q -pl analyzer exec:java -Dexec.mainClass=com.jgraph.analyzer.AppAnalyzer -Dexec.args="path/to/app.jar --include com.acme.*"
 
 # Build the MCP server (executable jar); an MCP client starts it with `java -jar` and talks over stdin/stdout
 mvn -pl mcp-server -am package
@@ -44,18 +44,31 @@ On Windows a running MCP client (a Claude Code session with the `jar-graph` serv
 before `package`/`verify`, or `repackage` fails with "Unable to rename".
 
 Java 21, Maven multi-module; dependency versions and BOMs live in the root `pom.xml`. No linter/formatter configured.
-DB config: `analyzer/src/main/resources/application.properties`, overridden by env vars `NEO4J_URI`,
-`NEO4J_USERNAME`, `NEO4J_PASSWORD`.
+Analyzer config: `analyzer/src/main/resources/application.properties` (`config.Settings`), each key overridden by an
+env var: `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, and `ANALYZER_INCLUDE` for `analyzer.include` (a
+`--include` on the command line wins over both).
 
 ## Analyzer architecture
 
-`AppAnalyzer` (CLI) → `JarReader` → `ModelResolver` (`CallResolver` → `OverrideResolver`) →
-`GraphRepository.initSchema()` / `deleteAll()` / `save()`, passing an `AnalysisResult` along (extract → transform →
-load). `ModelResolver` is the only public class of the `resolver` package and fixes the order of its steps.
+`AppAnalyzer` (CLI) → `ArchiveClassFileSource` → `BytecodeReader` → `ModelResolver` (`CallResolver` →
+`OverrideResolver`) → `GraphRepository.initSchema()` / `deleteAll()` / `save()`, passing an `AnalysisResult` along
+(extract → transform → load). `ModelResolver` is the only public class of the `resolver` package and fixes the order
+of its steps.
 
-- `JarReader` feeds every top-level `.class` entry to **one shared** `ModelBuildingClassVisitor`, which appends to plain
-  lists. Per method it creates a `ModelBuildingMethodVisitor` that emits a `MethodCall` per `visitMethodInsn` and the
-  `JavaMethod` itself in `visitEnd`. The whole model is held in memory before persistence.
+- Input (ADR-0012, package `source`, no ASM): `ClassFileSource` hands over class files (`ClassFile`: bytes +
+  origin like `app.jar!/BOOT-INF/lib/core.jar!/com/acme/Foo.class`) and decides nothing. `ArchiveClassFileSource`
+  reads a `.jar`/`.war`/`.ear` and every nested `.jar`/`.war` as streams (`ZipInputStream` on the entry, wrapped so
+  closing it does not close the outer one), at most `MAX_NESTING` = 4 levels; skips `META-INF/versions/**`,
+  `module-info.class`, `package-info.class`; keeps archive order. `PackageFilter` is the analysis boundary: `com.acme`
+  = `com.acme.*` = `com.acme.**` (package and below, whole segments), `*` = everything.
+- `BytecodeReader` (was `JarReader`) per class file: name from the bytecode (`ClassReader.getClassName()`, never the
+  entry path), skip it if outside the filter, skip it if the name was already read (first one wins, counted in
+  `ReadResult.duplicatesSkipped`), else feed it to **one shared** `ModelBuildingClassVisitor`, which appends to plain
+  lists. Per method that creates a `ModelBuildingMethodVisitor` that emits a `MethodCall` per `visitMethodInsn` and
+  the `JavaMethod` itself in `visitEnd`. The whole model is held in memory before persistence.
+- CLI (`CommandLine`, `AnalysisConfig`): the filter is required for every archive (`--include`, `ANALYZER_INCLUDE` or
+  `analyzer.include`; `--include-all` for everything), no default and no guessing; a filter matching nothing is
+  refused before `deleteAll()`. Exit codes 0 / 1 (I/O, Neo4j) / 2 (invalid input or configuration).
 - **Cross-file invariant:** the method signature string is built in two places, `JavaMethod.signature()` and
   `ModelBuildingMethodVisitor` (caller and call-target signatures). Both must stay `owner#name + descriptor`, or
   `CALLS` stop matching declared methods; the resolvers build and split it with the helpers of `TypeHierarchy`.
@@ -80,8 +93,11 @@ load). `ModelResolver` is the only public class of the `resolver` package and fi
   javac bytecode). `Neo4jGraphRepositoryIT` runs against `neo4j:5.26-community` via Testcontainers (no driver mocks),
   uses the package-private `(Driver, chunkSize)` constructor with tiny chunks to cover chunk boundaries, and checks
   call resolution with `resolveCallsFrom`, the query of ADR-0008. `TestJars` builds JARs from compiled test classes
-  (`JarReaderTestFixture`, `HierarchyFixture`, `TypeKindFixture`, `BridgeFixture`, `CallFixture`); keep fixtures free
-  of generics and covariant returns unless the test is about bridge methods (`BridgeFixture`).
+  (`JarReaderTestFixture`, `HierarchyFixture`, `TypeKindFixture`, `BridgeFixture`, `CallFixture`, `ArchiveFixture`
+  plus `org.thirdparty.library.ThirdPartyClient` as a library), nested archives with `TestJars.archive()` (classes in
+  any folder, `nested`/`nestedStored` jars), and reads them with `TestJars.parse` (the real source and reader, filter
+  `*`); keep fixtures free of generics and covariant returns unless the test is about bridge methods
+  (`BridgeFixture`). `ArchiveClassFileSourceTest` uses fake class bytes: the source never reads bytecode.
   Validate a new specification (red tests) against a throwaway reference implementation before handing it over.
 
 ### Graph model
@@ -194,9 +210,6 @@ persistence, graph model, configuration or test strategy.
 
 ## Backlog (agreed, not started)
 
-- `ClassFileSource` abstraction (separate PR): recurse into nested archives (Spring Boot fat jar, WAR, EAR), package
-  include filter, skip `META-INF/versions/**`, first-wins on duplicate classes. Input is the CI build artifact
-  (ADR-0002); multi-JAR inputs and `target/classes` dirs are out of scope unless a new ADR says otherwise.
 - MCP server (ADR-0009): all tools, the `graph://model` resource and the end-to-end STDIO test (`StdioTransportIT`,
   ADR-0011) done. Next (own branch): Streamable HTTP with authentication (own ADR) for AWS; set
   `spring.ai.mcp.server.protocol: STREAMABLE` and `stdio: false` explicitly (unset, Spring AI 2.0.1 starts the
@@ -219,4 +232,5 @@ persistence, graph model, configuration or test strategy.
 - Parser fidelity: `invokedynamic` (lambda/method-ref call chains), exact `@Transactional` descriptors + class-level
   annotation, consistent type naming.
 - Repository: mark stub nodes (`external = true`); driver ownership in `close()`.
-- CLI: non-zero exit codes on failure (ECS/Fargate job status), fail-fast connectivity check.
+- CLI: fail-fast connectivity check before reading the archive (exit codes done, ADR-0012). Multi-artifact inputs
+  and `target/classes` folders stay out of scope (ADR-0002) unless a new ADR says otherwise.

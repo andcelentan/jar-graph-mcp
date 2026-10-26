@@ -30,8 +30,10 @@ flowchart LR
     M --> AI["AI assistant / IDE"]
 ```
 
-1. **Analyzer**: reads the `.class` files of a JAR with [ASM](https://asm.ow2.io/) and extracts classes, interfaces,
-   inheritance, methods, method calls and `@Transactional` markers, straight from bytecode (no source code needed).
+1. **Analyzer**: reads the `.class` files of a JAR, WAR or EAR with [ASM](https://asm.ow2.io/), including the jars
+   nested in it (a Spring Boot fat jar's `BOOT-INF/lib`), and extracts classes, interfaces, inheritance, methods,
+   method calls and `@Transactional` markers, straight from bytecode (no source code needed). A package filter keeps
+   the analysis to the organization's own code ([ADR-0012](docs/adr/0012-read-nested-archives-filter-packages.md)).
    It then works out which methods override which, so that a call to an interface can be followed to the code that
    actually runs.
 2. **Knowledge graph**: the model is persisted to Neo4j as nodes and relationships, queryable with Cypher.
@@ -53,7 +55,7 @@ flowchart LR
 | MCP server: guarded read-only Cypher (`query_graph`), graph model resource | ✅ Done |
 | MCP server: STDIO transport safe for parallel tool calls, end-to-end test over STDIO | ✅ Done |
 | MCP server: Streamable HTTP with authentication | 🚧 Next |
-| Nested archives (Spring Boot fat jar, WAR, EAR) | 📋 Planned |
+| Nested archives (Spring Boot fat jar, WAR, EAR) and package filter | ✅ Done |
 | Parser fidelity (lambdas / method references) | 📋 Planned |
 | AWS deployment | 📋 Planned |
 
@@ -71,13 +73,20 @@ mvn -pl analyzer -am package
 # 3. Analyze a JAR (here: the analyzer itself)
 mvn -q -pl analyzer exec:java \
     -Dexec.mainClass=com.jgraph.analyzer.AppAnalyzer \
-    -Dexec.args=analyzer/target/analyzer-1.0.0-SNAPSHOT.jar
+    -Dexec.args="analyzer/target/analyzer-1.0.0-SNAPSHOT.jar --include com.jgraph.*"
 ```
 
 > ⚠️ Each run **replaces** the whole graph: one artifact per analysis.
 
-Connection settings come from `analyzer/src/main/resources/application.properties` and can be overridden with the
-`NEO4J_URI`, `NEO4J_USERNAME` and `NEO4J_PASSWORD` environment variables.
+`--include` says which packages are yours, and it is required: a Spring Boot fat jar, a WAR or an EAR also holds the
+jars of its libraries, hundreds of times more classes than the application. The analyzer reads your packages wherever
+they are, internal libraries in `BOOT-INF/lib` included, and leaves the rest out (`com.acme`, `com.acme.*` and
+`com.acme.**` mean the same; `--include-all` analyzes everything).
+
+Settings come from `analyzer/src/main/resources/application.properties` and can be overridden with environment
+variables: `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, and `ANALYZER_INCLUDE` for the package filter (in CI,
+e.g. `ANALYZER_INCLUDE=com.acme.*`). The analyzer exits with 0 on success, 1 when the analysis fails, 2 when the input
+or the configuration is invalid.
 
 ### Use it from an AI assistant
 
@@ -204,7 +213,6 @@ RETURN m.name AS method, collect(DISTINCT ext.signature) AS externalCalls
 - Methods of JDK or library supertypes are unknown, so implementing them (e.g. `Comparable#compareTo`) creates no
   `OVERRIDES` relationship.
 - Calls through lambdas and method references (`invokedynamic`) are not captured yet.
-- Only top-level `.class` entries are read: classes inside nested JARs are not analyzed yet.
 
 ## Architecture decisions
 

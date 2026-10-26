@@ -11,7 +11,6 @@ import com.jgraph.analyzer.model.Visibility;
 import com.jgraph.analyzer.parser.BridgeFixture;
 import com.jgraph.analyzer.parser.CallFixture;
 import com.jgraph.analyzer.parser.HierarchyFixture;
-import com.jgraph.analyzer.parser.JarReader;
 import com.jgraph.analyzer.parser.JarReaderTestFixture;
 import com.jgraph.analyzer.parser.TestJars;
 import com.jgraph.analyzer.parser.TypeKindFixture;
@@ -33,7 +32,6 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
-import java.util.jar.JarFile;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
@@ -185,10 +183,7 @@ class Neo4jGraphRepositoryIT {
                 JarReaderTestFixture.TestInterface.class,
                 JarReaderTestFixture.TestImplementation.class);
 
-        AnalysisResult result;
-        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
-            result = new JarReader(jarFile).readAndBuildModel();
-        }
+        AnalysisResult result = TestJars.parse(jarPath);
         repository.save(result);
 
         String impl = internalName(JarReaderTestFixture.TestImplementation.class);
@@ -239,10 +234,7 @@ class Neo4jGraphRepositoryIT {
     @Test
     void shouldPersistKindsWithoutImplicitSupertypeNodes(@TempDir Path tempDir) throws IOException {
         Path jarPath = TestJars.createJar(tempDir.resolve("kinds.jar"), TypeKindFixture.CLASSES);
-        AnalysisResult parsed;
-        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
-            parsed = new JarReader(jarFile).readAndBuildModel();
-        }
+        AnalysisResult parsed = TestJars.parse(jarPath);
 
         repository.save(parsed);
 
@@ -294,10 +286,7 @@ class Neo4jGraphRepositoryIT {
     @Test
     void shouldResolveCallsInHierarchyParsedFromJar(@TempDir Path tempDir) throws IOException {
         Path jarPath = TestJars.createJar(tempDir.resolve("hierarchy.jar"), HierarchyFixture.CLASSES);
-        AnalysisResult parsed;
-        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
-            parsed = new JarReader(jarFile).readAndBuildModel();
-        }
+        AnalysisResult parsed = TestJars.parse(jarPath);
 
         // Same pipeline as AppAnalyzer: parse -> resolve -> persist
         repository.save(new ModelResolver().resolve(parsed));
@@ -320,10 +309,7 @@ class Neo4jGraphRepositoryIT {
     @Test
     void shouldResolveGenericCallsToBridgedMethodNotToBridge(@TempDir Path tempDir) throws IOException {
         Path jarPath = TestJars.createJar(tempDir.resolve("bridges.jar"), BridgeFixture.CLASSES);
-        AnalysisResult parsed;
-        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
-            parsed = new JarReader(jarFile).readAndBuildModel();
-        }
+        AnalysisResult parsed = TestJars.parse(jarPath);
 
         repository.save(new ModelResolver().resolve(parsed));
 
@@ -342,10 +328,7 @@ class Neo4jGraphRepositoryIT {
     @Test
     void shouldResolveInheritedAndNonDispatchingCalls(@TempDir Path tempDir) throws IOException {
         Path jarPath = TestJars.createJar(tempDir.resolve("calls.jar"), CallFixture.CLASSES);
-        AnalysisResult parsed;
-        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
-            parsed = new JarReader(jarFile).readAndBuildModel();
-        }
+        AnalysisResult parsed = TestJars.parse(jarPath);
 
         repository.save(new ModelResolver().resolve(parsed));
 

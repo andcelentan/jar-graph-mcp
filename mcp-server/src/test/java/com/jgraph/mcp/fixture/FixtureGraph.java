@@ -1,7 +1,6 @@
 package com.jgraph.mcp.fixture;
 
 import com.jgraph.analyzer.model.AnalysisResult;
-import com.jgraph.analyzer.parser.JarReader;
 import com.jgraph.analyzer.parser.TestJars;
 import com.jgraph.analyzer.repository.Neo4jGraphRepository;
 import com.jgraph.analyzer.resolver.ModelResolver;
@@ -14,7 +13,6 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.jar.JarFile;
 
 /**
  * The graph of {@link McpFixture}, written by the analyzer pipeline itself (parse → resolve → save) on a real Neo4j
@@ -52,10 +50,7 @@ public final class FixtureGraph {
             Path jarPath = Files.createTempFile("mcp-fixture", ".jar");
             jarPath.toFile().deleteOnExit();
             TestJars.createJar(jarPath, McpFixture.CLASSES);
-            AnalysisResult parsed;
-            try (JarFile jarFile = new JarFile(jarPath.toFile())) {
-                parsed = new JarReader(jarFile).readAndBuildModel();
-            }
+            AnalysisResult parsed = TestJars.parse(jarPath);
             // Not closed: close() would also close the shared driver
             Neo4jGraphRepository repository = new Neo4jGraphRepository(driver);
             repository.initSchema();
