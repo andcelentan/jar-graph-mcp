@@ -16,3 +16,4 @@ Format: [Michael Nygard's ADR](https://cognitect.com/blog/2011/11/15/documenting
 | [0009](0009-mcp-server-with-spring-ai.md) | MCP server with Spring AI: STDIO first, read-only graph queries | Accepted |
 | [0010](0010-guard-query-graph-by-plan-operators.md) | Guard query_graph by plan operators, not only by query type | Accepted |
 | [0011](0011-serialize-stdio-tool-calls.md) | Serialize tool calls over STDIO with immediate execution | Accepted |
+| [0012](0012-read-nested-archives-filter-packages.md) | Read nested archives, analyze the packages chosen by configuration | Accepted |
