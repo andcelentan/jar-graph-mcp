@@ -10,7 +10,6 @@ import com.jgraph.analyzer.model.MethodOverride;
 import com.jgraph.analyzer.model.Visibility;
 import com.jgraph.analyzer.parser.BridgeFixture;
 import com.jgraph.analyzer.parser.HierarchyFixture;
-import com.jgraph.analyzer.parser.JarReader;
 import com.jgraph.analyzer.parser.TestJars;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -18,7 +17,6 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.jar.JarFile;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -399,10 +397,7 @@ class OverrideResolverTest {
     @Test
     void shouldAttributeBridgeOverridesFromRealBytecode(@TempDir Path tempDir) throws IOException {
         Path jarPath = TestJars.createJar(tempDir.resolve("bridges.jar"), BridgeFixture.CLASSES);
-        AnalysisResult parsed;
-        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
-            parsed = new JarReader(jarFile).readAndBuildModel();
-        }
+        AnalysisResult parsed = TestJars.parse(jarPath);
 
         String repository = internalName(BridgeFixture.Repository.class);
         String orderRepository = internalName(BridgeFixture.OrderRepository.class);
@@ -425,10 +420,7 @@ class OverrideResolverTest {
     @Test
     void shouldResolveOverridesFromRealBytecode(@TempDir Path tempDir) throws IOException {
         Path jarPath = TestJars.createJar(tempDir.resolve("hierarchy.jar"), HierarchyFixture.CLASSES);
-        AnalysisResult parsed;
-        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
-            parsed = new JarReader(jarFile).readAndBuildModel();
-        }
+        AnalysisResult parsed = TestJars.parse(jarPath);
 
         String paymentService = internalName(HierarchyFixture.PaymentService.class);
         String audited = internalName(HierarchyFixture.AuditedPaymentService.class);

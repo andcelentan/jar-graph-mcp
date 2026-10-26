@@ -8,7 +8,6 @@ import com.jgraph.analyzer.model.JavaMethod;
 import com.jgraph.analyzer.model.MethodCall;
 import com.jgraph.analyzer.model.Visibility;
 import com.jgraph.analyzer.parser.CallFixture;
-import com.jgraph.analyzer.parser.JarReader;
 import com.jgraph.analyzer.parser.TestJars;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -16,7 +15,6 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.jar.JarFile;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -220,10 +218,7 @@ class CallResolverTest {
     @Test
     void shouldResolveCallsFromRealBytecode(@TempDir Path tempDir) throws IOException {
         Path jarPath = TestJars.createJar(tempDir.resolve("calls.jar"), CallFixture.CLASSES);
-        AnalysisResult parsed;
-        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
-            parsed = new JarReader(jarFile).readAndBuildModel();
-        }
+        AnalysisResult parsed = TestJars.parse(jarPath);
 
         String api = internalName(CallFixture.PaymentService.class);
         String base = internalName(CallFixture.AbstractPaymentService.class);
