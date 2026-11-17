@@ -18,6 +18,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 public class AppAnalyzer {
 
@@ -27,13 +28,17 @@ public class AppAnalyzer {
     static final int INVALID_INPUT = 2;
 
     public static void main(String[] args) {
-        int status = run(args);
+        int status = run(() -> new Neo4jGraphRepository(DatabaseConfig.load()), args);
         if (status != OK) {
             System.exit(status);
         }
     }
 
-    static int run(String... args) {
+    /**
+     * @param repositories opens the graph repository; called only once the input is valid, and it may throw
+     *                     {@link IllegalArgumentException} for an invalid database configuration
+     */
+    static int run(Supplier<GraphRepository> repositories, String... args) {
         CommandLine commandLine;
         Optional<PackageFilter> filter;
         try {
@@ -57,19 +62,35 @@ public class AppAnalyzer {
             return INVALID_INPUT;
         }
 
+        GraphRepository repository;
         try {
-            return analyze(archive, filter.get());
+            repository = repositories.get();
+        } catch (IllegalArgumentException e) {
+            System.err.println("Invalid Neo4j configuration: " + e.getMessage());
+            return INVALID_INPUT;
+        }
+        try (repository) {
+            // Fail fast: reading and resolving a large archive takes long, and the database is needed only at the end
+            System.out.println("Checking the connection to Neo4j...");
+            try {
+                repository.verifyConnectivity();
+            } catch (Neo4jException e) {
+                System.err.println("Cannot connect to Neo4j: nothing analyzed, the graph is left as it is. Check "
+                        + "NEO4J_URI, NEO4J_USERNAME and NEO4J_PASSWORD (locally: is the Docker container running?).");
+                System.err.println("Details: " + e.getMessage());
+                return FAILED;
+            }
+            return analyze(archive, filter.get(), repository);
         } catch (IOException e) {
             System.err.println("I/O error during the analysis: " + e.getMessage());
             return FAILED;
         } catch (Neo4jException e) {
-            System.err.println("Database error: Could not interact with Neo4j. Is the Docker container running?");
-            System.err.println("Details: " + e.getMessage());
+            System.err.println("Database error while writing the graph, which may be incomplete: " + e.getMessage());
             return FAILED;
         }
     }
 
-    private static int analyze(Path archive, PackageFilter filter) throws IOException {
+    private static int analyze(Path archive, PackageFilter filter, GraphRepository repository) throws IOException {
         System.out.println("Start analysis: " + archive.toAbsolutePath() + " (packages: " + filter + ")");
         long start = System.currentTimeMillis();
 
@@ -85,12 +106,10 @@ public class AppAnalyzer {
 
         AnalysisResult result = new ModelResolver().resolve(read.model());
 
-        System.out.println("Connecting to Neo4j and persisting graph...");
-        try (GraphRepository repository = new Neo4jGraphRepository(DatabaseConfig.load())) {
-            repository.initSchema();
-            repository.deleteAll();
-            repository.save(result);
-        }
+        System.out.println("Persisting the graph...");
+        repository.initSchema();
+        repository.deleteAll();
+        repository.save(result);
         System.out.println("Persistence complete.");
 
         printSummary(result, System.currentTimeMillis() - start);

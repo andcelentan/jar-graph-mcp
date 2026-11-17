@@ -39,6 +39,15 @@ public class Neo4jGraphRepository implements GraphRepository {
         this.chunkSize = chunkSize;
     }
 
+    /**
+     * Opens a connection and authenticates: {@code ServiceUnavailableException} when Neo4j cannot be reached,
+     * {@code AuthenticationException} when it rejects the credentials (both {@code Neo4jException}).
+     */
+    @Override
+    public void verifyConnectivity() {
+        driver.verifyConnectivity();
+    }
+
     @Override
     public void initSchema() {
         try (Session session = driver.session()) {

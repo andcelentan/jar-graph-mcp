@@ -86,7 +86,8 @@ they are, internal libraries in `BOOT-INF/lib` included, and leaves the rest out
 Settings come from `analyzer/src/main/resources/application.properties` and can be overridden with environment
 variables: `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, and `ANALYZER_INCLUDE` for the package filter (in CI,
 e.g. `ANALYZER_INCLUDE=com.acme.*`). The analyzer exits with 0 on success, 1 when the analysis fails, 2 when the input
-or the configuration is invalid.
+or the configuration is invalid. It checks the connection to Neo4j before reading the archive, so a wrong address or
+password fails in seconds and leaves the graph as it is.
 
 ### Use it from an AI assistant
 
