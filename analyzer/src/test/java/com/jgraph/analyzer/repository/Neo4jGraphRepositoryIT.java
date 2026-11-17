@@ -21,9 +21,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.neo4j.driver.AuthTokens;
+import org.neo4j.driver.Config;
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.GraphDatabase;
 import org.neo4j.driver.Session;
+import org.neo4j.driver.exceptions.ServiceUnavailableException;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.neo4j.Neo4jContainer;
@@ -32,11 +34,13 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Integration tests against a real Neo4j instance (same image as docker-compose.yml).
@@ -74,6 +78,22 @@ class Neo4jGraphRepositoryIT {
         repository = new Neo4jGraphRepository(driver, TEST_CHUNK_SIZE);
         repository.initSchema();
         repository.deleteAll();
+    }
+
+    @Test
+    void shouldVerifyConnectivity() {
+        assertThatCode(repository::verifyConnectivity).doesNotThrowAnyException();
+    }
+
+    @Test
+    void shouldFailVerifyingConnectivityWhenNeo4jCannotBeReached() {
+        // Port 1 is never a Bolt server: the connection is refused at once
+        Config config = Config.builder().withConnectionTimeout(2, TimeUnit.SECONDS).build();
+        try (Neo4jGraphRepository unreachable = new Neo4jGraphRepository(
+                GraphDatabase.driver("bolt://localhost:1", AuthTokens.none(), config))) {
+
+            assertThatThrownBy(unreachable::verifyConnectivity).isInstanceOf(ServiceUnavailableException.class);
+        }
     }
 
     @Test

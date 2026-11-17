@@ -68,7 +68,10 @@ of its steps.
   the `JavaMethod` itself in `visitEnd`. The whole model is held in memory before persistence.
 - CLI (`CommandLine`, `AnalysisConfig`): the filter is required for every archive (`--include`, `ANALYZER_INCLUDE` or
   `analyzer.include`; `--include-all` for everything), no default and no guessing; a filter matching nothing is
-  refused before `deleteAll()`. Exit codes 0 / 1 (I/O, Neo4j) / 2 (invalid input or configuration).
+  refused before `deleteAll()`. Exit codes 0 / 1 (I/O, Neo4j) / 2 (invalid input or configuration). After the cheap
+  input checks and before reading the archive, `GraphRepository.verifyConnectivity()` fails fast (exit 1) on an
+  unreachable database or wrong credentials; a missing Neo4j setting is exit 2. `AppAnalyzer.run(Supplier<GraphRepository>,
+  args)` takes the repository so `AppAnalyzerTest` checks the order of the calls with a recording fake.
 - **Cross-file invariant:** the method signature string is built in two places, `JavaMethod.signature()` and
   `ModelBuildingMethodVisitor` (caller and call-target signatures). Both must stay `owner#name + descriptor`, or
   `CALLS` stop matching declared methods; the resolvers build and split it with the helpers of `TypeHierarchy`.
@@ -232,5 +235,5 @@ persistence, graph model, configuration or test strategy.
 - Parser fidelity: `invokedynamic` (lambda/method-ref call chains), exact `@Transactional` descriptors + class-level
   annotation, consistent type naming.
 - Repository: mark stub nodes (`external = true`); driver ownership in `close()`.
-- CLI: fail-fast connectivity check before reading the archive (exit codes done, ADR-0012). Multi-artifact inputs
+- CLI: multi-artifact inputs
   and `target/classes` folders stay out of scope (ADR-0002) unless a new ADR says otherwise.
