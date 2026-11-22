@@ -17,3 +17,4 @@ Format: [Michael Nygard's ADR](https://cognitect.com/blog/2011/11/15/documenting
 | [0010](0010-guard-query-graph-by-plan-operators.md) | Guard query_graph by plan operators, not only by query type | Accepted |
 | [0011](0011-serialize-stdio-tool-calls.md) | Serialize tool calls over STDIO with immediate execution | Accepted |
 | [0012](0012-read-nested-archives-filter-packages.md) | Read nested archives, analyze the packages chosen by configuration | Accepted |
+| [0013](0013-stateless-streamable-http-with-oauth.md) | Serve MCP over stateless Streamable HTTP, as an OAuth 2.1 resource server | Accepted |

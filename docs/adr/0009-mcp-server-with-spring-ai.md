@@ -4,8 +4,8 @@ Date: 2026-10-18
 
 ## Status
 
-Accepted, amended by [ADR-0010](0010-guard-query-graph-by-plan-operators.md) (query_graph checks) and
-[ADR-0011](0011-serialize-stdio-tool-calls.md) (STDIO tool calls)
+Accepted, amended by [ADR-0010](0010-guard-query-graph-by-plan-operators.md) (query_graph checks),
+[ADR-0011](0011-serialize-stdio-tool-calls.md) (STDIO tool calls) and [ADR-0013](0013-stateless-streamable-http-with-oauth.md) (Streamable HTTP with OAuth)
 
 ## Context
 
