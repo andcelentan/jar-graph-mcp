@@ -26,7 +26,7 @@ reflects the latest build of the application, internal dependencies included.
 flowchart LR
     JAR[".jar"] --> A["analyzer<br/>bytecode parsing (ASM)<br/>+ override resolution"]
     A --> N[("Neo4j<br/>knowledge graph")]
-    N --> M["mcp-server<br/>MCP tools over STDIO"]
+    N --> M["mcp-server<br/>MCP tools over STDIO<br/>or authenticated HTTP"]
     M --> AI["AI assistant / IDE"]
 ```
 
@@ -40,7 +40,9 @@ flowchart LR
 3. **MCP server**: exposes the graph to AI assistants as tools of the
    [Model Context Protocol](https://modelcontextprotocol.io/), so the IDE can fetch the exact context of the code
    being changed. Built with Spring AI, it reads the graph only, and its answers are facts from bytecode: an empty
-   answer always says why ([ADR-0009](docs/adr/0009-mcp-server-with-spring-ai.md)).
+   answer always says why ([ADR-0009](docs/adr/0009-mcp-server-with-spring-ai.md)). The same jar runs locally over
+   STDIO, or as a shared server over stateless Streamable HTTP that accepts only OAuth 2.1 access tokens
+   ([ADR-0013](docs/adr/0013-stateless-streamable-http-with-oauth.md)).
 
 ## Status
 
@@ -54,10 +56,10 @@ flowchart LR
 | MCP server: `find_implementations`, `describe_class`, `find_callers` (STDIO) | ✅ Done |
 | MCP server: guarded read-only Cypher (`query_graph`), graph model resource | ✅ Done |
 | MCP server: STDIO transport safe for parallel tool calls, end-to-end test over STDIO | ✅ Done |
-| MCP server: Streamable HTTP with authentication | 🚧 Next |
+| MCP server: stateless Streamable HTTP as an OAuth 2.1 resource server (JWT, RFC 9728 metadata, Origin check) | ✅ Done |
 | Nested archives (Spring Boot fat jar, WAR, EAR) and package filter | ✅ Done |
 | Parser fidelity (lambdas / method references) | 📋 Planned |
-| AWS deployment | 📋 Planned |
+| AWS deployment (Terraform) | 🚧 Next |
 
 ## Quick start
 
@@ -130,6 +132,34 @@ Cypher.
 
 Class names can be simple (`JarReader`) or qualified (`com.jgraph.analyzer.parser.JarReader`): every matching class
 and every overload is returned, and the assistant picks.
+
+### Run it as a shared HTTP server
+
+The same jar serves MCP over stateless Streamable HTTP with the `http` profile
+([ADR-0013](docs/adr/0013-stateless-streamable-http-with-oauth.md)). It is an OAuth 2.1 **resource server**: it never
+logs users in, it validates the access tokens an authorization server (e.g. Amazon Cognito) issued for it. There is no
+unauthenticated HTTP mode; for local use without tokens, use STDIO.
+
+```bash
+MCP_OAUTH_ISSUER_URI=https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_AbC123 \
+MCP_RESOURCE_URL=https://mcp.example.com/mcp \
+MCP_REQUIRED_SCOPE=https://mcp.example.com/mcp/graph:read \
+java -jar mcp-server/target/mcp-server-1.0.0-SNAPSHOT.jar --spring.profiles.active=http
+```
+
+| Variable | Meaning | Required |
+|----------|---------|----------|
+| `MCP_OAUTH_ISSUER_URI` | The only trusted issuer; its signing keys are found through its discovery document | yes |
+| `MCP_RESOURCE_URL` | Public URL of the MCP endpoint: tokens must carry it in `aud`, and the metadata publishes it | yes |
+| `MCP_REQUIRED_SCOPE` | Scope every request needs, as the issuer writes it (Cognito: `<resource server id>/graph:read`) | yes |
+| `MCP_ALLOWED_ORIGINS` | Comma-separated `Origin` values accepted from browser-based clients; empty refuses them all | no |
+| `SERVER_ADDRESS`, `SERVER_PORT` | Listen address and port; `127.0.0.1:8080` by default (`0.0.0.0` in a container) | no |
+
+A missing required variable stops the server at startup. A request without a valid token gets `401` with a
+`WWW-Authenticate` header pointing at `/.well-known/oauth-protected-resource/mcp` (RFC 9728), where an MCP client
+reads which authorization server to use and which scope to ask for; a valid token without the scope gets `403`.
+Tokens are checked locally on every request: `RS256` signature against the issuer's keys, expiry, issuer, and
+audience, so a token issued for another service of the same issuer is refused.
 
 ### Example queries
 
@@ -225,21 +255,26 @@ Significant design decisions, with their context and trade-offs, are recorded as
 ```bash
 mvn -pl analyzer -am test       # unit tests
 mvn -pl analyzer -am verify     # + integration tests against a real Neo4j (Testcontainers, requires Docker)
-mvn -pl mcp-server -am verify   # + MCP tools, on a graph written by the analyzer itself
+mvn -pl mcp-server -am verify   # + MCP tools, on a graph written by the analyzer itself, and both transports
 ```
+
+The HTTP security tests need no cloud account: the test plays the authorization server, signing tokens with a key it
+generates and publishing the public key, so the server validates them exactly as in production.
 
 ## Roadmap & cloud vision
 
-Once the local MCP server is proven to work end to end, the next step is scaling to the cloud with an event-driven
-architecture on AWS:
+The MCP server works end to end locally and is ready to run as a shared, authenticated service. The next step is
+scaling to the cloud with an event-driven architecture on AWS:
 
 1. **Ingestion**: uploading a JAR to Amazon S3 emits an event that, through Amazon EventBridge, starts an analysis task
    on Amazon ECS (Fargate).
 2. **Analysis**: the task parses the JAR and populates the graph database, either Neo4j (Aura or self-managed on AWS)
    or Amazon Neptune.
-3. **MCP server**: runs as an ECS service and exposes a set of tools the LLM can call.
-4. **Security**: MCP clients authenticate with OAuth 2.1, as required by the MCP authorization specification (e.g. with
-   Amazon Cognito as the authorization server), while IAM roles govern access between AWS services.
+3. **MCP server**: runs as an ECS service behind a load balancer, with the `http` profile (stateless, so any task
+   answers any request).
+4. **Security**: MCP clients authenticate with OAuth 2.1, as required by the MCP authorization specification, with
+   Amazon Cognito as the authorization server (Essentials plan, for resource indicators); IAM roles govern access
+   between AWS services.
 5. **Infrastructure as code**: the whole AWS infrastructure is provisioned with Terraform.
 
 ## License

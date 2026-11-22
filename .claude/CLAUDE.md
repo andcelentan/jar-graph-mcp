@@ -8,8 +8,9 @@ Bytecode analyzer (ASM) → Neo4j knowledge graph → MCP server that lets AI as
 (classes, methods, calls, hierarchies) deterministically instead of guessing it.
 
 - `analyzer`: archive parsing (jar, war, ear, nested jars; ADR-0012) + graph persistence.
-- `mcp-server`: Spring AI 2.0.1 / Spring Boot 4.1.1 MCP server over STDIO (ADR-0009): `find_implementations`,
-  `describe_class`, `find_callers`, `query_graph` and the `graph://model` resource.
+- `mcp-server`: Spring AI 2.0.1 / Spring Boot 4.1.1 MCP server (ADR-0009): `find_implementations`,
+  `describe_class`, `find_callers`, `query_graph` and the `graph://model` resource; STDIO by default, stateless
+  Streamable HTTP as an OAuth 2.1 resource server with the `http` profile (ADR-0013).
 - Target: event-driven on AWS, provisioned with Terraform (S3 upload → EventBridge → ECS/Fargate analysis task;
   Neo4j Aura/self-managed or Neptune; MCP server as an ECS service; OAuth 2.1 for MCP clients, e.g. Cognito; IAM roles
   between AWS services). Local design choices should not block that path.
@@ -33,6 +34,11 @@ mvn -pl mcp-server -am package
 mvn -pl mcp-server -am verify        # analyzer + server tests (server ITs need Docker)
 # Single server IT: with -am the analyzer has no matching IT, hence the failsafe flag
 mvn -pl mcp-server -am verify -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false -Dfailsafe.failIfNoSpecifiedTests=false -Dit.test=FindImplementationsToolIT
+# Without repackaging (jar locked): only ITs that do not start the packaged jar, i.e. not StdioTransportIT
+mvn -pl mcp-server verify -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false -Dfailsafe.failIfNoSpecifiedTests=false -Dit.test=HttpSecurityIT -Dspring-boot.repackage.skip=true
+
+# Run the server over HTTP (ADR-0013): every MCP_* below is required, the server refuses to start without it
+MCP_OAUTH_ISSUER_URI=https://issuer MCP_RESOURCE_URL=https://host/mcp MCP_REQUIRED_SCOPE=graph:read java -jar mcp-server/target/mcp-server-1.0.0-SNAPSHOT.jar --spring.profiles.active=http
 ```
 
 `mcp-server` imports the Spring Boot and Spring AI BOMs in its own `dependencyManagement`, so they do not affect the
@@ -41,7 +47,10 @@ the Neo4j driver version of the root `pom.xml` wins in both. With STDIO, stdout 
 web server, logs on stderr (`logback-spring.xml`). Do not probe the server from PowerShell 5.1: it writes a UTF-8 BOM
 on stdin and the first message fails to parse; use a bash coprocess or the SDK client.
 On Windows a running MCP client (a Claude Code session with the `jar-graph` server) locks the packaged jar: stop it
-before `package`/`verify`, or `repackage` fails with "Unable to rename".
+before `package`/`verify`, or `repackage` fails with "Unable to rename" (`clean` with "Failed to delete"). Claude Code
+starts it from the untracked `.mcp.json` and may restart it during the session: stop the `java` processes whose command
+line holds `mcp-server-1.0.0-SNAPSHOT.jar` again, or add `"disabledMcpjsonServers": ["jar-graph"]` to
+`.claude/settings.local.json` while working on the server.
 
 Java 21, Maven multi-module; dependency versions and BOMs live in the root `pom.xml`. No linter/formatter configured.
 Analyzer config: `analyzer/src/main/resources/application.properties` (`config.Settings`), each key overridden by an
@@ -135,7 +144,8 @@ of its steps.
 
 Packages by feature, one per tool: `implementations`, `callers`, `classes`, `cypher` (`query_graph` and the
 `graph://model` resource), plus `shared` (`MethodInfo`, `MethodSummary`, `SourceNames`, `Notes`, `GraphSupport` with
-`MATCH_CLASSES_BY_NAME` and `toMethodInfo`) and `transport` (STDIO configuration, below). Inside a feature: `XxxTool` (`@McpTool`) → `XxxQuery` (Cypher and
+`MATCH_CLASSES_BY_NAME` and `toMethodInfo`), `transport` (STDIO configuration, below) and `security` (the `http`
+profile, below). Inside a feature: `XxxTool` (`@McpTool`) → `XxxQuery` (Cypher and
 mapping) → the Neo4j `Driver` auto-configured by Spring Boot (`spring.neo4j.*` in `application.yml`, same env vars as
 the analyzer). One query per tool call. **A new tool is a new package.** Only `shared`, the tools and the records
 serialized to JSON are `public`; queries, fact records and constructors are package-private (Spring injects them
@@ -191,6 +201,37 @@ anyway). Tests mirror the packages.
   process (failsafe passes its path as `mcp-server.jar`), sends 200 calls without waiting and requires every response
   and a clean exit on end of input; it talks raw JSON-RPC through `JsonRpcPeer`, never the SDK client (same queue on
   the client side). Re-run it on every SDK or Spring AI upgrade.
+- HTTP (ADR-0013): one jar, `spring-ai-starter-mcp-server-webmvc`. `application.yml` keeps STDIO with
+  `web-application-type: none`, the only thing keeping Tomcat (now on the classpath) off; `application-http.yml`
+  turns on `servlet`, `stdio: false`, `protocol: STATELESS` (endpoint `/mcp`, no `Mcp-Session-Id`, `GET` → 405) and
+  listens on `127.0.0.1` unless `SERVER_ADDRESS` says otherwise. There is no unauthenticated HTTP mode.
+  - Token validation is configuration, not code: `spring.security.oauth2.resourceserver.jwt.issuer-uri` (discovery →
+    JWKS), `audiences` (the resource URL) and `jws-algorithms: RS256`, filled from `MCP_OAUTH_ISSUER_URI` and
+    `MCP_RESOURCE_URL`. `McpSecurityProperties` (`jar-graph.security.*`, also from `MCP_REQUIRED_SCOPE` and the
+    optional `MCP_ALLOWED_ORIGINS`) validates them in its constructor. One resource URL feeds both the audience and the
+    RFC 9728 metadata, so the two cannot diverge.
+  - `HttpSecurityConfiguration` (`@Profile("http")`) declares the `SecurityFilterChain`: every request needs
+    `SCOPE_<required scope>` (`403` + `insufficient_scope` otherwise), stateless sessions, CSRF off (bearer tokens are
+    never sent by the browser on its own), Spring Security 7's Protected Resource Metadata at
+    `/.well-known/oauth-protected-resource/**`, and a `BearerTokenAuthenticationEntryPoint` whose `resource_metadata`
+    comes from configuration, never from the request (behind a load balancer the request names the internal address).
+    `OriginFilter` runs before `BearerTokenAuthenticationFilter`: an `Origin` not in the list gets `403` with
+    `setStatus` (`sendError` would dispatch to `/error`, which the chain answers with `401`). CORS would not do: in DNS
+    rebinding page and target share the origin.
+  - Pitfalls found: Spring Boot binds an unresolved `${VAR}` as literal text, so `McpSecurityProperties` rejects values
+    starting with `${`; `@ConfigurationPropertiesScan` registers `@ConfigurationProperties` records in every profile,
+    so profile-only properties carry `@Profile` themselves (without it STDIO failed at startup, seen only by
+    `StdioTransportIT`). After a server change run the whole build, not only the test of the feature.
+  - Tests: `TestAuthorizationServer` (test package `security`) plays the issuer: RSA key, discovery document and JWKS
+    (public key only) on a loopback port, and a `Token` builder valid by default, spoiled one claim at a time (foreign
+    key under the same `kid`, `alg: none`, expired beyond the 60 s clock skew, other issuer/audience, no scope).
+    `TestAuthorizationServerTest` checks it against `JwtDecoders.fromIssuerLocation` and pins that Spring does not check
+    the audience by default. `HttpSecurityIT` is the specification (`@SpringBootTest`, `DEFINED_PORT` on a port picked
+    before startup because the resource URL must name it; configuration passed as the `MCP_*` variables): the matrix of
+    ADR-0013, 50 parallel calls with matching ids, and refusal to start without each required variable. Validated by
+    mutation (audience, scope, Origin filter and its position each turn only their own tests red). Not covered: the
+    metadata URL coming from configuration rather than the request (equal in the test), `jws-algorithms` alone (Nimbus
+    rejects `alg: none` anyway).
 
 ## Working agreement
 
@@ -213,10 +254,11 @@ persistence, graph model, configuration or test strategy.
 
 ## Backlog (agreed, not started)
 
-- MCP server (ADR-0009): all tools, the `graph://model` resource and the end-to-end STDIO test (`StdioTransportIT`,
-  ADR-0011) done. Next (own branch): Streamable HTTP with authentication (own ADR) for AWS; set
-  `spring.ai.mcp.server.protocol: STREAMABLE` and `stdio: false` explicitly (unset, Spring AI 2.0.1 starts the
-  deprecated SSE transport).
+- MCP server (ADR-0009): all tools, the `graph://model` resource, the end-to-end STDIO test (ADR-0011) and stateless
+  Streamable HTTP with OAuth (ADR-0013) done. Next: AWS deployment with Terraform (own ADR; the developer writes the
+  Terraform). Open points from ADR-0013: an unauthenticated health endpoint for the load balancer; Cognito Essentials
+  with managed login, a Cognito resource server whose identifier is the resource URL, and a pre-registered client;
+  restricted write access to the task definition (issuer and resource URL are trust anchors).
   - Requirement for every tool: **never an empty answer without saying why.** Same gap as Spring Data for other
     runtime-generated implementations (Feign clients); MapStruct and Lombok are fine (code generated at compile time,
     present in the JAR).
