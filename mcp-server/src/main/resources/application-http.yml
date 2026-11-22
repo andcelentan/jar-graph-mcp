@@ -1,0 +1,32 @@
+# Stateless Streamable HTTP, as an OAuth 2.1 resource server (ADR-0013): java -jar mcp-server.jar --spring.profiles.active=http
+# Values without a default (${NAME}) are required: if one is missing the server refuses to start (ADR-0013, decision 3).
+spring:
+  main:
+    web-application-type: servlet   # overrides the STDIO default of application.yml: Tomcat starts
+  ai:
+    mcp:
+      server:
+        stdio: false
+        protocol: STATELESS         # no Mcp-Session-Id: any task answers any request; the endpoint is /mcp
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # The only trusted issuer: its discovery document gives the jwks_uri, the keys are fetched from there
+          issuer-uri: ${MCP_OAUTH_ISSUER_URI}
+          # Tokens must be issued for this server (RFC 8707): the aud claim must contain the resource URL
+          audiences: ${MCP_RESOURCE_URL}
+          # Never the algorithm named in the token header: alg=none and HS256 tokens are rejected
+          jws-algorithms: RS256
+
+server:
+  # Loopback only unless the environment opens it (SERVER_ADDRESS=0.0.0.0 in a container); SERVER_PORT sets the port
+  address: 127.0.0.1
+
+jar-graph:
+  security:
+    issuer-uri: ${MCP_OAUTH_ISSUER_URI}
+    resource-url: ${MCP_RESOURCE_URL}
+    required-scope: ${MCP_REQUIRED_SCOPE}
+    # Comma separated; empty: every request carrying an Origin header is refused (ADR-0013, decision 6)
+    allowed-origins: ${MCP_ALLOWED_ORIGINS:}

@@ -43,10 +43,10 @@
     </dependencyManagement>
 
     <dependencies>
-        <!-- MCP server over STDIO, no web stack (ADR-0009) -->
+        <!-- STDIO by default; stateless Streamable HTTP with the http profile (ADR-0013) -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-starter-mcp-server</artifactId>
+            <artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
         </dependency>
         <!-- Neo4j driver plus Spring Boot auto-configuration of the Driver bean (spring.neo4j.* properties) -->
         <dependency>
@@ -57,6 +57,14 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-annotations</artifactId>
+        </dependency>
+        <!--
+          Validates the JWT access tokens of the http profile (Spring Security + Nimbus JOSE). A resource server only:
+          this server never logs users in nor issues tokens, the authorization server does (ADR-0013)
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
         </dependency>
 
         <!-- Test: graphs are built by the real analyzer pipeline on compiled fixtures (ADR-0009) -->
@@ -91,6 +99,12 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>testcontainers-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Starts the whole application in tests (@SpringBootTest): security lives in the HTTP filters of a running server -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
